@@ -236,7 +236,10 @@ function OrderTracking() {
     return fallbackFlow;
   }, [hasTracking, trackingData]);
 
-  const history = hasTracking ? trackingData?.statusHistory || [] : [];
+  const history = React.useMemo(() => {
+    if (!hasTracking) return [];
+    return trackingData?.statusHistory || [];
+  }, [hasTracking, trackingData]);
   const historyMap = React.useMemo(() => {
     const entries = new Map();
     history.forEach(status => {

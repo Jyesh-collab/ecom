@@ -111,7 +111,6 @@ function Checkout({ cartItems = [], onOrderComplete }) {
     }
   };
 
-  const selectedIds = Array.from(selectedItems);
   const itemsToShow = cartItems.filter(item => {
     const id = item._id || item.id;
     return id && selectedItems.has(id);

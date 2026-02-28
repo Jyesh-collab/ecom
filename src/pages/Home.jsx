@@ -116,7 +116,6 @@ const brandInitials = ['SONY', 'BOSE', 'LG', 'SAMSUNG', 'ANKER', 'APPLE'];
 /* ---------- Pretty states for Recommended ---------- */
 function RecommendedError({ error, onRetry }) {
   const [showDetails, setShowDetails] = React.useState(false);
-  const detail = error?.response?.data?.message || error?.message || 'Unknown error. Please try again.';
 
   return (
     <Alert
@@ -215,12 +214,6 @@ function Home({ products, addToCart, error, loading }) {
       .sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0))
       .slice(0, 6)
       .map(normalizeProduct);
-  }, [products]);
-  const topRated = React.useMemo(() => {
-    if (!Array.isArray(products)) return [];
-    const rated = products.filter(p => typeof p?.rating === 'number' && p.rating >= 4.2);
-    const base = rated.length ? rated : products;
-    return base.slice(0, 6).map(normalizeProduct);
   }, [products]);
   const categories = React.useMemo(() => {
     const unique = new Map();
