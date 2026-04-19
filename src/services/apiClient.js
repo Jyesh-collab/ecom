@@ -1,15 +1,18 @@
 import axios from 'axios';
 
 const resolveBaseURL = () => {
+  // Check for explicit environment variables first
   const envUrl = process.env.REACT_APP_API_BASE_URL || process.env.REACT_APP_API_URL;
   if (envUrl) {
     return envUrl.replace(/\/$/, '');
   }
 
-  if (process.env.REACT_APP_API_USE_PROXY === 'true') {
-    return '/api';
+  // In development mode, use local backend
+  if (process.env.NODE_ENV === 'development') {
+    return 'http://localhost:5000/api';
   }
 
+  // Production fallback
   return 'https://fusion-electronics-api.vercel.app/api';
 };
 

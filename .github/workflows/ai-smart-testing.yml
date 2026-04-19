@@ -152,7 +152,7 @@ jobs:
         run: |
           # Only run if AI says to run frontend tests
           if [[ '${{ needs.ai-analyze-changes.outputs.tests_to_run }}' == *'frontend'* ]]; then
-            npm test -- --json --outputFile=test-results-frontend.json --passWithNoTests 2>&1 || true
+            npm test -- --json --outputFile=test-results-frontend.json 2>&1 || echo "Tests failed, but continuing..."
           else
             echo "⏭️  Frontend tests skipped by AI analysis"
             echo '{"numPassedTests": 0, "numFailedTests": 0, "numTotalTests": 0}' > test-results-frontend.json
@@ -222,7 +222,7 @@ jobs:
           # Only run if AI says to run backend tests
           if [[ '${{ needs.ai-analyze-changes.outputs.tests_to_run }}' == *'backend'* ]]; then
             cd backend
-            npm test -- --json --outputFile=../test-results-backend.json --passWithNoTests 2>&1 || true
+            npm test -- --json --outputFile=../test-results-backend.json 2>&1 || echo "Tests failed, but continuing..."
           else
             echo "⏭️  Backend tests skipped by AI analysis"
             echo '{"numPassedTests": 0, "numFailedTests": 0, "numTotalTests": 0}' > ../test-results-backend.json
@@ -292,7 +292,7 @@ jobs:
         run: |
           # Only run if AI says to run e2e tests
           if [[ '${{ needs.ai-analyze-changes.outputs.tests_to_run }}' == *'e2e'* ]]; then
-            npm run e2e -- --reporter=json > e2e-results.json 2>&1 || true
+            npm run e2e -- --reporter=json > e2e-results.json 2>&1 || echo "E2E tests failed, but continuing..."
           else
             echo "⏭️  E2E tests skipped by AI analysis"
             echo '{"suites": [{"tests": []}]}' > e2e-results.json
@@ -579,3 +579,104 @@ jobs:
                 summary: 'AI-powered smart testing pipeline',
               },
             });
+
+  # ============================================================================
+  # STEP 7: Generate HTML Report
+  # ============================================================================
+  generate-report:
+    name: 📊 Generate HTML Report
+    needs: [ai-analyze-changes, run-frontend-tests, run-backend-tests, run-e2e-tests, ai-analyze-failures]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download all test results
+        uses: actions/download-artifact@v4
+
+      - name: Install Node packages
+        run: npm install
+
+      - name: Generate HTML Report
+        run: |
+          node .github/scripts/generate-html-report.js
+        env:
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          IMPACT_SCORE: ${{ needs.ai-analyze-changes.outputs.impact_score }}
+          FAILURES_FOUND: ${{ needs.ai-analyze-failures.outputs.failures_found }}
+          JIRA_ISSUES: ${{ needs.ai-analyze-failures.outputs.failure_summary }}
+
+      - name: Upload Report Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-report-html
+          path: test-report-html/
+
+      - name: Deploy to GitHub Pages (temporary)
+        run: |
+          echo "Report generated at: test-report-html/index.html"
+          echo "✅ Report ready for deployment"
+
+  # ============================================================================
+  # STEP 8: Send Email Notification
+  # ============================================================================
+  send-email:
+    name: 📧 Send Email Notification
+    needs: [ai-analyze-changes, run-frontend-tests, run-backend-tests, run-e2e-tests, ai-analyze-failures, generate-report]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Calculate Metrics
+        id: metrics
+        run: |
+          FRONTEND_PASSED=$(echo "${{ needs.run-frontend-tests.outputs.passed }}" || echo 0)
+          FRONTEND_FAILED=$(echo "${{ needs.run-frontend-tests.outputs.failed }}" || echo 0)
+          BACKEND_PASSED=$(echo "${{ needs.run-backend-tests.outputs.passed }}" || echo 0)
+          BACKEND_FAILED=$(echo "${{ needs.run-backend-tests.outputs.failed }}" || echo 0)
+          E2E_PASSED=$(echo "${{ needs.run-e2e-tests.outputs.passed }}" || echo 0)
+          E2E_FAILED=$(echo "${{ needs.run-e2e-tests.outputs.failed }}" || echo 0)
+          
+          TOTAL_PASSED=$((FRONTEND_PASSED + BACKEND_PASSED + E2E_PASSED))
+          TOTAL_FAILED=$((FRONTEND_FAILED + BACKEND_FAILED + E2E_FAILED))
+          TOTAL_TESTS=$((TOTAL_PASSED + TOTAL_FAILED))
+          
+          if [ $TOTAL_TESTS -gt 0 ]; then
+            PASS_RATE=$((TOTAL_PASSED * 100 / TOTAL_TESTS))
+          else
+            PASS_RATE=0
+          fi
+          
+          IMPACT_SCORE=${{ needs.ai-analyze-changes.outputs.impact_score }}
+          HEALTH_SCORE=$(( (PASS_RATE * 70 / 100) + ((100 - IMPACT_SCORE) * 30 / 100) ))
+          
+          echo "total_passed=$TOTAL_PASSED" >> $GITHUB_OUTPUT
+          echo "total_failed=$TOTAL_FAILED" >> $GITHUB_OUTPUT
+          echo "total_tests=$TOTAL_TESTS" >> $GITHUB_OUTPUT
+          echo "pass_rate=$PASS_RATE" >> $GITHUB_OUTPUT
+          echo "health_score=$HEALTH_SCORE" >> $GITHUB_OUTPUT
+
+      - name: Send Email
+        run: |
+          node .github/scripts/send-email-notification.js
+        env:
+          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
+          PR_AUTHOR_EMAIL: ${{ github.event.pull_request.user.login }}@users.noreply.github.com
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          REPORT_URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          HEALTH_SCORE: ${{ steps.metrics.outputs.health_score }}
+          IMPACT_SCORE: ${{ needs.ai-analyze-changes.outputs.impact_score }}
+          TOTAL_TESTS: ${{ steps.metrics.outputs.total_tests }}
+          PASSED_TESTS: ${{ steps.metrics.outputs.total_passed }}
+          FAILED_TESTS: ${{ steps.metrics.outputs.total_failed }}
+          FAILURES_FOUND: ${{ needs.ai-analyze-failures.outputs.failures_found }}

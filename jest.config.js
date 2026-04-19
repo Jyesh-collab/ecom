@@ -12,4 +12,18 @@ module.exports = {
     '/node_modules/(?!@mui|react-material-ui-carousel)/'
   ],
   testPathIgnorePatterns: ['/node_modules/', '/build/'],
+  reporters: [
+    'default',
+    [
+      'jest-html-reporters',
+      {
+        publicPath: './test-report-frontend',
+        filename: 'index.html',
+        pageTitle: 'Frontend Test Report',
+        expand: true,
+        openReport: false,
+        inlineSource: true,
+      },
+    ],
+  ],
 };
