@@ -58,6 +58,12 @@ jobs:
           script: |
             const { OpenAI } = require('openai');
             
+            // Validate API key
+            if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY.trim() === '') {
+              core.setFailed('❌ OPENAI_API_KEY secret is missing or empty. Please add it in repository Settings → Secrets.');
+              return;
+            }
+            
             const openai = new OpenAI({
               apiKey: process.env.OPENAI_API_KEY,
             });
@@ -114,8 +120,13 @@ jobs:
               console.log('✅ Tests to Run:', analysis.testsToRun.join(', '));
               console.log('⏭️  Tests to Skip:', analysis.testsToSkip?.join(', ') || 'none');
             } catch (error) {
-              console.error('❌ AI analysis failed:', error.message);
-              // Fallback: run all tests
+              const msg = error.message || '';
+              if (msg.includes('401') || msg.includes('Incorrect API key') || msg.includes('invalid_api_key')) {
+                core.setFailed(`❌ OpenAI API key is invalid: ${msg}`);
+                return;
+              }
+              console.error('❌ AI analysis failed:', msg);
+              // Fallback: run all tests only for non-auth errors
               core.setOutput('analysis', JSON.stringify({
                 impactScore: 100,
                 testsToRun: ['frontend', 'backend', 'e2e'],
@@ -361,6 +372,12 @@ jobs:
             const axios = require('axios');
             const { OpenAI } = require('openai');
             
+            // Validate API key
+            if (!process.env.OPENAI_API_KEY || process.env.OPENAI_API_KEY.trim() === '') {
+              core.setFailed('❌ OPENAI_API_KEY secret is missing or empty. Please add it in repository Settings → Secrets.');
+              return;
+            }
+            
             const openai = new OpenAI({
               apiKey: process.env.OPENAI_API_KEY,
             });
@@ -483,10 +500,15 @@ jobs:
               core.setOutput('jira_issue', jiraIssueKey);
               core.setOutput('failure_summary', JSON.stringify(analysis));
             } catch (error) {
-              console.error('❌ AI analysis failed:', error.message);
+              const msg = error.message || '';
+              if (msg.includes('401') || msg.includes('Incorrect API key') || msg.includes('invalid_api_key')) {
+                core.setFailed(`❌ OpenAI API key is invalid: ${msg}`);
+                return;
+              }
+              console.error('❌ AI analysis failed:', msg);
               core.setOutput('failures_found', true);
               core.setOutput('jira_issue', 'None');
-              core.setOutput('failure_summary', JSON.stringify({ error: error.message }));
+              core.setOutput('failure_summary', JSON.stringify({ error: msg }));
             }
 
   # ============================================================================
