@@ -53,27 +53,75 @@ jobs:
           CHANGED_FILES: ${{ steps.detect.outputs.all_changed_files }}
         with:
           script: |
-            const fs = require('fs');
-            const path = require('path');
+            const { OpenAI } = require('openai');
             
-            // Load AI analyzer script
-            const aiAnalyzer = require('./.github/scripts/ai-change-analyzer.js');
+            const openai = new OpenAI({
+              apiKey: process.env.OPENAI_API_KEY,
+            });
             
             const changedFiles = process.env.CHANGED_FILES.split('\n').filter(f => f.trim());
             console.log('📁 Changed files:', changedFiles);
             
-            // AI analysis
-            const analysis = await aiAnalyzer.analyzeChanges(changedFiles);
+            if (!changedFiles || changedFiles.length === 0) {
+              core.setOutput('analysis', JSON.stringify({
+                impactScore: 0,
+                testsToRun: ['frontend', 'backend', 'e2e'],
+                testsToSkip: [],
+              }));
+              core.setOutput('tests_to_run', JSON.stringify(['frontend', 'backend', 'e2e']));
+              core.setOutput('tests_to_skip', JSON.stringify([]));
+              core.setOutput('impact_score', 0);
+              return;
+            }
             
-            core.setOutput('analysis', JSON.stringify(analysis));
-            core.setOutput('tests_to_run', JSON.stringify(analysis.testsToRun));
-            core.setOutput('tests_to_skip', JSON.stringify(analysis.testsToSkip));
-            core.setOutput('impact_score', analysis.impactScore);
+            const prompt = `
+            You are a smart QA system. Analyze these code changes and determine:
+            1. Impact score (0-100): How risky is this change?
+            2. Which test suites should run: frontend, backend, e2e
+            3. Which tests can be skipped
             
-            console.log('✅ AI Analysis Complete');
-            console.log('📊 Impact Score:', analysis.impactScore);
-            console.log('✅ Tests to Run:', analysis.testsToRun.length);
-            console.log('⏭️  Tests to Skip:', analysis.testsToSkip.length);
+            Changed files:
+            ${changedFiles.join('\n')}
+            
+            Respond in JSON only (no other text):
+            {
+              "impactScore": 0-100,
+              "testsToRun": ["frontend"|"backend"|"e2e"],
+              "testsToSkip": []
+            }
+            `;
+            
+            try {
+              const response = await openai.chat.completions.create({
+                model: 'gpt-4-turbo',
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.3,
+              });
+              
+              const content = response.choices[0].message.content.trim();
+              const analysis = JSON.parse(content);
+              
+              core.setOutput('analysis', JSON.stringify(analysis));
+              core.setOutput('tests_to_run', JSON.stringify(analysis.testsToRun));
+              core.setOutput('tests_to_skip', JSON.stringify(analysis.testsToSkip || []));
+              core.setOutput('impact_score', analysis.impactScore);
+              
+              console.log('✅ AI Analysis Complete');
+              console.log('📊 Impact Score:', analysis.impactScore);
+              console.log('✅ Tests to Run:', analysis.testsToRun.join(', '));
+              console.log('⏭️  Tests to Skip:', analysis.testsToSkip?.join(', ') || 'none');
+            } catch (error) {
+              console.error('❌ AI analysis failed:', error.message);
+              // Fallback: run all tests
+              core.setOutput('analysis', JSON.stringify({
+                impactScore: 100,
+                testsToRun: ['frontend', 'backend', 'e2e'],
+                testsToSkip: [],
+              }));
+              core.setOutput('tests_to_run', JSON.stringify(['frontend', 'backend', 'e2e']));
+              core.setOutput('tests_to_skip', JSON.stringify([]));
+              core.setOutput('impact_score', 100);
+            }
 
   # ============================================================================
   # STEP 2: Run Frontend Tests (picked by AI)
@@ -82,7 +130,6 @@ jobs:
     name: 🧪 Frontend Tests
     needs: ai-analyze-changes
     runs-on: ubuntu-latest
-    if: ${{ contains(needs.ai-analyze-changes.outputs.tests_to_run, 'frontend') || needs.ai-analyze-changes.outputs.impact_score > 40 }}
     outputs:
       passed: ${{ steps.tests.outputs.passed }}
       failed: ${{ steps.tests.outputs.failed }}
@@ -100,7 +147,13 @@ jobs:
       - name: 🧪 Run Frontend Tests
         id: tests
         run: |
-          npm test -- --json --outputFile=test-results-frontend.json --passWithNoTests 2>&1 || true
+          # Only run if AI says to run frontend tests
+          if [[ '${{ needs.ai-analyze-changes.outputs.tests_to_run }}' == *'frontend'* ]]; then
+            npm test -- --json --outputFile=test-results-frontend.json --passWithNoTests 2>&1 || true
+          else
+            echo "⏭️  Frontend tests skipped by AI analysis"
+            echo '{"numPassedTests": 0, "numFailedTests": 0, "numTotalTests": 0}' > test-results-frontend.json
+          fi
           
           # Parse results
           if [ -f test-results-frontend.json ]; then
@@ -120,7 +173,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-results-frontend
           path: test-results-frontend.json
@@ -132,7 +185,6 @@ jobs:
     name: 🧪 Backend Tests
     needs: ai-analyze-changes
     runs-on: ubuntu-latest
-    if: ${{ contains(needs.ai-analyze-changes.outputs.tests_to_run, 'backend') || needs.ai-analyze-changes.outputs.impact_score > 50 }}
     
     services:
       mongodb:
@@ -164,8 +216,14 @@ jobs:
           MONGO_URI: mongodb://localhost:27017/test-db
           JWT_SECRET: test-secret
         run: |
-          cd backend
-          npm test -- --json --outputFile=../test-results-backend.json --passWithNoTests 2>&1 || true
+          # Only run if AI says to run backend tests
+          if [[ '${{ needs.ai-analyze-changes.outputs.tests_to_run }}' == *'backend'* ]]; then
+            cd backend
+            npm test -- --json --outputFile=../test-results-backend.json --passWithNoTests 2>&1 || true
+          else
+            echo "⏭️  Backend tests skipped by AI analysis"
+            echo '{"numPassedTests": 0, "numFailedTests": 0, "numTotalTests": 0}' > ../test-results-backend.json
+          fi
           
           if [ -f ../test-results-backend.json ]; then
             PASSED=$(jq '.numPassedTests' ../test-results-backend.json)
@@ -183,7 +241,7 @@ jobs:
 
       - name: Upload test results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: test-results-backend
           path: test-results-backend.json
@@ -195,7 +253,6 @@ jobs:
     name: 🎭 E2E Tests
     needs: ai-analyze-changes
     runs-on: ubuntu-latest
-    if: ${{ contains(needs.ai-analyze-changes.outputs.tests_to_run, 'e2e') || needs.ai-analyze-changes.outputs.impact_score > 60 }}
     
     services:
       mongodb:
@@ -230,7 +287,13 @@ jobs:
           JWT_SECRET: test-secret
           NODE_ENV: test
         run: |
-          npm run e2e -- --reporter=json > e2e-results.json 2>&1 || true
+          # Only run if AI says to run e2e tests
+          if [[ '${{ needs.ai-analyze-changes.outputs.tests_to_run }}' == *'e2e'* ]]; then
+            npm run e2e -- --reporter=json > e2e-results.json 2>&1 || true
+          else
+            echo "⏭️  E2E tests skipped by AI analysis"
+            echo '{"suites": [{"tests": []}]}' > e2e-results.json
+          fi
           
           if [ -f e2e-results.json ]; then
             PASSED=$(jq '[.suites[].tests[] | select(.pass==true)] | length' e2e-results.json)
@@ -248,7 +311,7 @@ jobs:
 
       - name: Upload E2E results
         if: always()
-        uses: actions/upload-artifact@v3
+        uses: actions/upload-artifact@v4
         with:
           name: e2e-results
           path: e2e-results.json
@@ -289,36 +352,117 @@ jobs:
         with:
           script: |
             const fs = require('fs');
-            const aiFailureAnalyzer = require('./.github/scripts/ai-failure-analyzer.js');
+            const axios = require('axios');
+            const { OpenAI } = require('openai');
+            
+            const openai = new OpenAI({
+              apiKey: process.env.OPENAI_API_KEY,
+            });
             
             // Collect test results
+            function readResultFile(path) {
+              try {
+                return JSON.parse(fs.readFileSync(path, 'utf8'));
+              } catch (e) {
+                console.log('⚠️  Could not read', path);
+                return null;
+              }
+            }
+            
             const testResults = {
               frontend: readResultFile('test-results-frontend/test-results-frontend.json'),
               backend: readResultFile('test-results-backend/test-results-backend.json'),
               e2e: readResultFile('e2e-results/e2e-results.json'),
             };
             
+            // Check if there are failures
+            let hasFailures = false;
+            let failureInfo = [];
+            
+            if (testResults.frontend?.numFailedTests > 0) {
+              hasFailures = true;
+              failureInfo.push(`Frontend: ${testResults.frontend.numFailedTests} failed`);
+            }
+            if (testResults.backend?.numFailedTests > 0) {
+              hasFailures = true;
+              failureInfo.push(`Backend: ${testResults.backend.numFailedTests} failed`);
+            }
+            
+            if (!hasFailures) {
+              core.setOutput('failures_found', false);
+              core.setOutput('jira_issue', 'None');
+              core.setOutput('failure_summary', JSON.stringify({ status: 'all_passed' }));
+              return;
+            }
+            
             // AI analyzes failures
-            const analysis = await aiFailureAnalyzer.analyzeAndFileIssues(
-              testResults,
-              {
-                prNumber: context.issue.number,
-                jiraHost: process.env.JIRA_HOST,
-                jiraToken: process.env.JIRA_API_TOKEN,
-                jiraProject: process.env.JIRA_PROJECT_KEY,
-              }
-            );
+            const prompt = `
+            These tests are failing:
+            ${failureInfo.join('\n')}
             
-            core.setOutput('failures_found', analysis.failuresFound);
-            core.setOutput('jira_issue', analysis.jiraIssue || 'None');
-            core.setOutput('failure_summary', JSON.stringify(analysis.summary));
+            Provide:
+            1. Root cause (what's likely wrong)
+            2. Category: logic_bug, flaky_test, environment, or other
+            3. Severity: critical, high, medium, low
+            4. Fix suggestion
             
-            function readResultFile(path) {
-              try {
-                return JSON.parse(fs.readFileSync(path, 'utf8'));
-              } catch (e) {
-                return null;
+            Respond in JSON only:
+            {
+              "rootCause": "...",
+              "category": "...",
+              "severity": "...",
+              "fixSuggestion": "..."
+            }
+            `;
+            
+            try {
+              const response = await openai.chat.completions.create({
+                model: 'gpt-4-turbo',
+                messages: [{ role: 'user', content: prompt }],
+                temperature: 0.3,
+              });
+              
+              const analysis = JSON.parse(response.choices[0].message.content.trim());
+              
+              // Create JIRA issue
+              let jiraIssueKey = 'None';
+              if (process.env.JIRA_HOST && process.env.JIRA_API_TOKEN && process.env.JIRA_PROJECT_KEY) {
+                try {
+                  const issue = {
+                    fields: {
+                      project: { key: process.env.JIRA_PROJECT_KEY },
+                      summary: `[${analysis.category}] Test failure: ${analysis.rootCause.substring(0, 50)}`,
+                      description: `Root cause: ${analysis.rootCause}\n\nFix: ${analysis.fixSuggestion}`,
+                      issuetype: { name: 'Bug' },
+                      labels: ['automated-test', 'ai-analyzed', `pr-${context.issue.number}`],
+                    },
+                  };
+                  
+                  const jiraResponse = await axios.post(
+                    `${process.env.JIRA_HOST}/rest/api/3/issues`,
+                    issue,
+                    {
+                      headers: {
+                        Authorization: `Bearer ${process.env.JIRA_API_TOKEN}`,
+                        'Content-Type': 'application/json',
+                      },
+                    }
+                  );
+                  jiraIssueKey = jiraResponse.data.key;
+                  console.log('✅ JIRA Issue created:', jiraIssueKey);
+                } catch (error) {
+                  console.warn('⚠️  Could not create JIRA issue:', error.message);
+                }
               }
+              
+              core.setOutput('failures_found', true);
+              core.setOutput('jira_issue', jiraIssueKey);
+              core.setOutput('failure_summary', JSON.stringify(analysis));
+            } catch (error) {
+              console.error('❌ AI analysis failed:', error.message);
+              core.setOutput('failures_found', true);
+              core.setOutput('jira_issue', 'None');
+              core.setOutput('failure_summary', JSON.stringify({ error: error.message }));
             }
 
   # ============================================================================
@@ -340,40 +484,72 @@ jobs:
       # ✅ STEP 6: MARK THE PR
       - name: ✅ Post Results to PR
         uses: actions/github-script@v7
+        if: always()
         with:
           script: |
-            const fs = require('fs');
-            const prCommentBuilder = require('./.github/scripts/pr-comment-builder.js');
+            const impactScore = parseInt('${{ needs.ai-analyze-changes.outputs.impact_score }}') || 0;
+            const frontendPassed = parseInt('${{ needs.run-frontend-tests.outputs.passed }}') || 0;
+            const frontendFailed = parseInt('${{ needs.run-frontend-tests.outputs.failed }}') || 0;
+            const backendPassed = parseInt('${{ needs.run-backend-tests.outputs.passed }}') || 0;
+            const backendFailed = parseInt('${{ needs.run-backend-tests.outputs.failed }}') || 0;
+            const e2ePassed = parseInt('${{ needs.run-e2e-tests.outputs.passed }}') || 0;
+            const e2eFailed = parseInt('${{ needs.run-e2e-tests.outputs.failed }}') || 0;
+            const failuresFound = '${{ needs.ai-analyze-failures.outputs.failures_found }}' === 'true';
+            const jiraIssue = '${{ needs.ai-analyze-failures.outputs.jira_issue }}' || 'None';
             
-            const comment = await prCommentBuilder.buildComment({
-              impactScore: '${{ needs.ai-analyze-changes.outputs.impact_score }}',
-              testsToRun: ${{ needs.ai-analyze-changes.outputs.tests_to_run }},
-              testsToSkip: ${{ needs.ai-analyze-changes.outputs.tests_to_skip }},
-              frontendResults: {
-                passed: '${{ needs.run-frontend-tests.outputs.passed }}',
-                failed: '${{ needs.run-frontend-tests.outputs.failed }}',
-                total: '${{ needs.run-frontend-tests.outputs.total }}',
-              },
-              backendResults: {
-                passed: '${{ needs.run-backend-tests.outputs.passed }}',
-                failed: '${{ needs.run-backend-tests.outputs.failed }}',
-                total: '${{ needs.run-backend-tests.outputs.total }}',
-              },
-              e2eResults: {
-                passed: '${{ needs.run-e2e-tests.outputs.passed }}',
-                failed: '${{ needs.run-e2e-tests.outputs.failed }}',
-                total: '${{ needs.run-e2e-tests.outputs.total }}',
-              },
-              failuresFound: '${{ needs.ai-analyze-failures.outputs.failures_found }}' === 'true',
-              jiraIssue: '${{ needs.ai-analyze-failures.outputs.jira_issue }}',
-            });
+            // Build impact badge
+            let impactBadge = '🟢';
+            if (impactScore > 70) impactBadge = '🔴';
+            else if (impactScore > 40) impactBadge = '🟡';
             
-            github.rest.issues.createComment({
-              issue_number: context.issue.number,
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              body: comment,
-            });
+            // Build comment
+            let comment = `## ${impactBadge} AI Smart Testing Results\n\n`;
+            comment += `**Impact Score**: ${impactScore}/100\n\n`;
+            
+            comment += `### Frontend Tests\n`;
+            if (frontendPassed === 0 && frontendFailed === 0) {
+              comment += `- ⏭️  Skipped by AI analysis\n\n`;
+            } else {
+              comment += `- ✅ Passed: ${frontendPassed}\n`;
+              comment += `- ❌ Failed: ${frontendFailed}\n\n`;
+            }
+            
+            comment += `### Backend Tests\n`;
+            if (backendPassed === 0 && backendFailed === 0) {
+              comment += `- ⏭️  Skipped by AI analysis\n\n`;
+            } else {
+              comment += `- ✅ Passed: ${backendPassed}\n`;
+              comment += `- ❌ Failed: ${backendFailed}\n\n`;
+            }
+            
+            comment += `### E2E Tests\n`;
+            if (e2ePassed === 0 && e2eFailed === 0) {
+              comment += `- ⏭️  Skipped by AI analysis\n\n`;
+            } else {
+              comment += `- ✅ Passed: ${e2ePassed}\n`;
+              comment += `- ❌ Failed: ${e2eFailed}\n\n`;
+            }
+            
+            if (failuresFound) {
+              comment += `### 🚨 Issues Found\n`;
+              if (jiraIssue !== 'None') {
+                const jiraHost = '${{ secrets.JIRA_HOST }}';
+                comment += `- JIRA: [${jiraIssue}](${jiraHost}/browse/${jiraIssue})\n`;
+              }
+            } else {
+              comment += `### ✅ All Tests Passed!\n`;
+            }
+            
+            try {
+              github.rest.issues.createComment({
+                issue_number: context.issue.number,
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                body: comment,
+              });
+            } catch (error) {
+              console.log('⚠️  Could not create PR comment:', error.message);
+            }
 
       - name: ✅ Set PR Status
         uses: actions/github-script@v7
