@@ -394,6 +394,24 @@ jobs:
               failureInfo.push(`Backend: ${testResults.backend.numFailedTests} failed`);
             }
             
+            // Also check if jobs themselves failed (e.g. npm ci failure)
+            const frontendJobResult = '${{ needs.run-frontend-tests.result }}';
+            const backendJobResult = '${{ needs.run-backend-tests.result }}';
+            const e2eJobResult = '${{ needs.run-e2e-tests.result }}';
+            
+            if (frontendJobResult === 'failure') {
+              hasFailures = true;
+              failureInfo.push('Frontend job failed (build/install error)');
+            }
+            if (backendJobResult === 'failure') {
+              hasFailures = true;
+              failureInfo.push('Backend job failed (build/install error)');
+            }
+            if (e2eJobResult === 'failure') {
+              hasFailures = true;
+              failureInfo.push('E2E job failed (build/install error)');
+            }
+            
             if (!hasFailures) {
               core.setOutput('failures_found', false);
               core.setOutput('jira_issue', 'None');
@@ -515,8 +533,15 @@ jobs:
             let comment = `## ${impactBadge} AI Smart Testing Results\n\n`;
             comment += `**Impact Score**: ${impactScore}/100\n\n`;
             
+            // Check job-level results
+            const frontendJobResult = '${{ needs.run-frontend-tests.result }}';
+            const backendJobResult = '${{ needs.run-backend-tests.result }}';
+            const e2eJobResult = '${{ needs.run-e2e-tests.result }}';
+            
             comment += `### Frontend Tests\n`;
-            if (frontendPassed === 0 && frontendFailed === 0) {
+            if (frontendJobResult === 'failure') {
+              comment += `- 💥 Job failed (build/install error)\n\n`;
+            } else if (frontendPassed === 0 && frontendFailed === 0) {
               comment += `- ⏭️  Skipped by AI analysis\n\n`;
             } else {
               comment += `- ✅ Passed: ${frontendPassed}\n`;
@@ -524,7 +549,9 @@ jobs:
             }
             
             comment += `### Backend Tests\n`;
-            if (backendPassed === 0 && backendFailed === 0) {
+            if (backendJobResult === 'failure') {
+              comment += `- 💥 Job failed (build/install error)\n\n`;
+            } else if (backendPassed === 0 && backendFailed === 0) {
               comment += `- ⏭️  Skipped by AI analysis\n\n`;
             } else {
               comment += `- ✅ Passed: ${backendPassed}\n`;
@@ -532,7 +559,9 @@ jobs:
             }
             
             comment += `### E2E Tests\n`;
-            if (e2ePassed === 0 && e2eFailed === 0) {
+            if (e2eJobResult === 'failure') {
+              comment += `- 💥 Job failed (build/install error)\n\n`;
+            } else if (e2ePassed === 0 && e2eFailed === 0) {
               comment += `- ⏭️  Skipped by AI analysis\n\n`;
             } else {
               comment += `- ✅ Passed: ${e2ePassed}\n`;
@@ -635,6 +664,9 @@ jobs:
       - uses: actions/setup-node@v3
         with:
           node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm install axios
 
       - name: Calculate Metrics
         id: metrics
