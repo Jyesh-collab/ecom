@@ -1,0 +1,56 @@
+{
+  "test-mapping": {
+    "src/pages/**": [
+      "src/tests/Cart.test.js",
+      "src/tests/Checkout.test.js",
+      "src/tests/Shop.test.js",
+      "src/tests/Home.test.js"
+    ],
+    "src/components/**": [
+      "src/tests/Cart.test.js",
+      "src/tests/Checkout.test.js",
+      "src/tests/Home.test.js"
+    ],
+    "src/services/**": [
+      "src/tests/Cart.test.js",
+      "src/tests/Checkout.test.js",
+      "src/tests/Shop.test.js",
+      "src/tests/Login.test.js"
+    ],
+    "src/context/**": [
+      "src/tests/Cart.test.js",
+      "src/tests/Checkout.test.js"
+    ],
+    "backend/routes/**": [
+      "backend/__tests__/products.spec.js",
+      "backend/__tests__/checkout.spec.js",
+      "backend/__tests__/auth.spec.js",
+      "backend/__tests__/search.spec.js"
+    ],
+    "backend/models/**": [
+      "backend/__tests__/products.spec.js",
+      "backend/__tests__/auth.spec.js",
+      "backend/__tests__/checkout.spec.js"
+    ],
+    "backend/services/**": [
+      "backend/__tests__/products.spec.js",
+      "backend/__tests__/embeddingService.spec.js"
+    ],
+    "backend/middleware/**": [
+      "backend/__tests__/auth.spec.js"
+    ],
+    "src/App.jsx": [
+      "src/tests/Home.test.js",
+      "src/tests/Shop.test.js",
+      "src/tests/Cart.test.js"
+    ],
+    "backend/index.js": [
+      "backend/__tests__/products.spec.js",
+      "backend/__tests__/auth.spec.js"
+    ],
+    "package.json": [
+      "src/tests/*.test.js",
+      "backend/__tests__/*.spec.js"
+    ]
+  }
+}

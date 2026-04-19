@@ -1,0 +1,396 @@
+name: 🤖 AI-Powered Smart Testing
+
+on:
+  pull_request:
+    branches: [main, develop]
+    types: [opened, synchronize]
+
+env:
+  NODE_VERSION: '18'
+
+jobs:
+  # ============================================================================
+  # STEP 1: AI reads the change
+  # ============================================================================
+  ai-analyze-changes:
+    name: 🤖 AI Analyzes Changes
+    runs-on: ubuntu-latest
+    outputs:
+      changed_files: ${{ steps.detect.outputs.all_changed_files }}
+      ai_analysis: ${{ steps.ai_analyze.outputs.analysis }}
+      tests_to_run: ${{ steps.ai_analyze.outputs.tests_to_run }}
+      tests_to_skip: ${{ steps.ai_analyze.outputs.tests_to_skip }}
+      impact_score: ${{ steps.ai_analyze.outputs.impact_score }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Detect changed files
+        id: detect
+        uses: tj-actions/changed-files@v40
+        with:
+          files: |
+            src/**
+            backend/**
+            package.json
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ✅ STEP 1: AI READS THE CHANGE
+      - name: 🤖 AI Analyzes Code Changes
+        id: ai_analyze
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          CHANGED_FILES: ${{ steps.detect.outputs.all_changed_files }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            
+            // Load AI analyzer script
+            const aiAnalyzer = require('./.github/scripts/ai-change-analyzer.js');
+            
+            const changedFiles = process.env.CHANGED_FILES.split('\n').filter(f => f.trim());
+            console.log('📁 Changed files:', changedFiles);
+            
+            // AI analysis
+            const analysis = await aiAnalyzer.analyzeChanges(changedFiles);
+            
+            core.setOutput('analysis', JSON.stringify(analysis));
+            core.setOutput('tests_to_run', JSON.stringify(analysis.testsToRun));
+            core.setOutput('tests_to_skip', JSON.stringify(analysis.testsToSkip));
+            core.setOutput('impact_score', analysis.impactScore);
+            
+            console.log('✅ AI Analysis Complete');
+            console.log('📊 Impact Score:', analysis.impactScore);
+            console.log('✅ Tests to Run:', analysis.testsToRun.length);
+            console.log('⏭️  Tests to Skip:', analysis.testsToSkip.length);
+
+  # ============================================================================
+  # STEP 2: Run Frontend Tests (picked by AI)
+  # ============================================================================
+  run-frontend-tests:
+    name: 🧪 Frontend Tests
+    needs: ai-analyze-changes
+    runs-on: ubuntu-latest
+    if: ${{ contains(needs.ai-analyze-changes.outputs.tests_to_run, 'frontend') || needs.ai-analyze-changes.outputs.impact_score > 40 }}
+    outputs:
+      passed: ${{ steps.tests.outputs.passed }}
+      failed: ${{ steps.tests.outputs.failed }}
+      total: ${{ steps.tests.outputs.total }}
+      test_results: ${{ steps.tests.outputs.test_results }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: 🧪 Run Frontend Tests
+        id: tests
+        run: |
+          npm test -- --json --outputFile=test-results-frontend.json --passWithNoTests 2>&1 || true
+          
+          # Parse results
+          if [ -f test-results-frontend.json ]; then
+            PASSED=$(jq '.numPassedTests' test-results-frontend.json)
+            FAILED=$(jq '.numFailedTests' test-results-frontend.json)
+            TOTAL=$(jq '.numTotalTests' test-results-frontend.json)
+          else
+            PASSED=0
+            FAILED=0
+            TOTAL=0
+          fi
+          
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+          echo "test_results=$(cat test-results-frontend.json | base64 -w 0)" >> $GITHUB_OUTPUT
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-frontend
+          path: test-results-frontend.json
+
+  # ============================================================================
+  # STEP 3: Run Backend Tests (picked by AI)
+  # ============================================================================
+  run-backend-tests:
+    name: 🧪 Backend Tests
+    needs: ai-analyze-changes
+    runs-on: ubuntu-latest
+    if: ${{ contains(needs.ai-analyze-changes.outputs.tests_to_run, 'backend') || needs.ai-analyze-changes.outputs.impact_score > 50 }}
+    
+    services:
+      mongodb:
+        image: mongo:6
+        options: >-
+          --health-cmd mongosh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 27017:27017
+
+    outputs:
+      passed: ${{ steps.tests.outputs.passed }}
+      failed: ${{ steps.tests.outputs.failed }}
+      total: ${{ steps.tests.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install backend dependencies
+        run: cd backend && npm ci
+
+      - name: 🧪 Run Backend Tests
+        id: tests
+        env:
+          MONGO_URI: mongodb://localhost:27017/test-db
+          JWT_SECRET: test-secret
+        run: |
+          cd backend
+          npm test -- --json --outputFile=../test-results-backend.json --passWithNoTests 2>&1 || true
+          
+          if [ -f ../test-results-backend.json ]; then
+            PASSED=$(jq '.numPassedTests' ../test-results-backend.json)
+            FAILED=$(jq '.numFailedTests' ../test-results-backend.json)
+            TOTAL=$(jq '.numTotalTests' ../test-results-backend.json)
+          else
+            PASSED=0
+            FAILED=0
+            TOTAL=0
+          fi
+          
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: test-results-backend
+          path: test-results-backend.json
+
+  # ============================================================================
+  # STEP 4: Run E2E Tests (picked by AI)
+  # ============================================================================
+  run-e2e-tests:
+    name: 🎭 E2E Tests
+    needs: ai-analyze-changes
+    runs-on: ubuntu-latest
+    if: ${{ contains(needs.ai-analyze-changes.outputs.tests_to_run, 'e2e') || needs.ai-analyze-changes.outputs.impact_score > 60 }}
+    
+    services:
+      mongodb:
+        image: mongo:6
+        options: >-
+          --health-cmd mongosh
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 27017:27017
+
+    outputs:
+      passed: ${{ steps.tests.outputs.passed }}
+      failed: ${{ steps.tests.outputs.failed }}
+      total: ${{ steps.tests.outputs.total }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install dependencies
+        run: |
+          npm ci
+          cd backend && npm ci
+
+      - name: 🎭 Run E2E Tests
+        id: tests
+        env:
+          MONGO_URI: mongodb://localhost:27017/test-db
+          JWT_SECRET: test-secret
+          NODE_ENV: test
+        run: |
+          npm run e2e -- --reporter=json > e2e-results.json 2>&1 || true
+          
+          if [ -f e2e-results.json ]; then
+            PASSED=$(jq '[.suites[].tests[] | select(.pass==true)] | length' e2e-results.json)
+            FAILED=$(jq '[.suites[].tests[] | select(.pass==false)] | length' e2e-results.json)
+            TOTAL=$(jq '[.suites[].tests[]] | length' e2e-results.json)
+          else
+            PASSED=0
+            FAILED=0
+            TOTAL=0
+          fi
+          
+          echo "passed=$PASSED" >> $GITHUB_OUTPUT
+          echo "failed=$FAILED" >> $GITHUB_OUTPUT
+          echo "total=$TOTAL" >> $GITHUB_OUTPUT
+
+      - name: Upload E2E results
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: e2e-results
+          path: e2e-results.json
+
+  # ============================================================================
+  # STEP 5: AI analyzes test results & files bugs
+  # ============================================================================
+  ai-analyze-failures:
+    name: 🤖 AI Analyzes Failures
+    needs: [ai-analyze-changes, run-frontend-tests, run-backend-tests, run-e2e-tests]
+    if: always()
+    runs-on: ubuntu-latest
+    outputs:
+      failures_found: ${{ steps.ai_failure.outputs.failures_found }}
+      jira_issue: ${{ steps.ai_failure.outputs.jira_issue }}
+      failure_summary: ${{ steps.ai_failure.outputs.failure_summary }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Download all test results
+        uses: actions/download-artifact@v3
+
+      - name: Install dependencies
+        run: npm ci
+
+      # ✅ STEP 5: AI FILES BUGS
+      - name: 🤖 AI Analyzes Failures & Files Bugs
+        id: ai_failure
+        uses: actions/github-script@v7
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          JIRA_HOST: ${{ secrets.JIRA_HOST }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+        with:
+          script: |
+            const fs = require('fs');
+            const aiFailureAnalyzer = require('./.github/scripts/ai-failure-analyzer.js');
+            
+            // Collect test results
+            const testResults = {
+              frontend: readResultFile('test-results-frontend/test-results-frontend.json'),
+              backend: readResultFile('test-results-backend/test-results-backend.json'),
+              e2e: readResultFile('e2e-results/e2e-results.json'),
+            };
+            
+            // AI analyzes failures
+            const analysis = await aiFailureAnalyzer.analyzeAndFileIssues(
+              testResults,
+              {
+                prNumber: context.issue.number,
+                jiraHost: process.env.JIRA_HOST,
+                jiraToken: process.env.JIRA_API_TOKEN,
+                jiraProject: process.env.JIRA_PROJECT_KEY,
+              }
+            );
+            
+            core.setOutput('failures_found', analysis.failuresFound);
+            core.setOutput('jira_issue', analysis.jiraIssue || 'None');
+            core.setOutput('failure_summary', JSON.stringify(analysis.summary));
+            
+            function readResultFile(path) {
+              try {
+                return JSON.parse(fs.readFileSync(path, 'utf8'));
+              } catch (e) {
+                return null;
+              }
+            }
+
+  # ============================================================================
+  # STEP 6: Mark PR with results
+  # ============================================================================
+  mark-pr:
+    name: ✅ Mark PR
+    needs: [ai-analyze-changes, run-frontend-tests, run-backend-tests, run-e2e-tests, ai-analyze-failures]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      # ✅ STEP 6: MARK THE PR
+      - name: ✅ Post Results to PR
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const prCommentBuilder = require('./.github/scripts/pr-comment-builder.js');
+            
+            const comment = await prCommentBuilder.buildComment({
+              impactScore: '${{ needs.ai-analyze-changes.outputs.impact_score }}',
+              testsToRun: ${{ needs.ai-analyze-changes.outputs.tests_to_run }},
+              testsToSkip: ${{ needs.ai-analyze-changes.outputs.tests_to_skip }},
+              frontendResults: {
+                passed: '${{ needs.run-frontend-tests.outputs.passed }}',
+                failed: '${{ needs.run-frontend-tests.outputs.failed }}',
+                total: '${{ needs.run-frontend-tests.outputs.total }}',
+              },
+              backendResults: {
+                passed: '${{ needs.run-backend-tests.outputs.passed }}',
+                failed: '${{ needs.run-backend-tests.outputs.failed }}',
+                total: '${{ needs.run-backend-tests.outputs.total }}',
+              },
+              e2eResults: {
+                passed: '${{ needs.run-e2e-tests.outputs.passed }}',
+                failed: '${{ needs.run-e2e-tests.outputs.failed }}',
+                total: '${{ needs.run-e2e-tests.outputs.total }}',
+              },
+              failuresFound: '${{ needs.ai-analyze-failures.outputs.failures_found }}' === 'true',
+              jiraIssue: '${{ needs.ai-analyze-failures.outputs.jira_issue }}',
+            });
+            
+            github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: comment,
+            });
+
+      - name: ✅ Set PR Status
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const failuresFound = '${{ needs.ai-analyze-failures.outputs.failures_found }}' === 'true';
+            const status = failuresFound ? 'failure' : 'success';
+            
+            github.rest.checks.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              name: '🤖 AI Smart Testing',
+              head_sha: context.payload.pull_request.head.sha,
+              status: 'completed',
+              conclusion: failuresFound ? 'failure' : 'success',
+              output: {
+                title: failuresFound ? '❌ Tests Failed' : '✅ All Tests Passed',
+                summary: 'AI-powered smart testing pipeline',
+              },
+            });
