@@ -19,10 +19,11 @@ env:
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # 1. Detect which files changed and resolve the relevant test files
+  # 1. AI Test Intelligence Gate — Claude analyses the diff and decides which
+  #    tests to run. This job MUST pass before anything else proceeds.
   # ─────────────────────────────────────────────────────────────────────────────
   detect-changes:
-    name: Detect Changed Files & Resolve Tests
+    name: "🤖 AI Test Intelligence Gate"
     runs-on: ubuntu-latest
     outputs:
       test-files: ${{ steps.resolve.outputs.test-files }}
@@ -38,9 +39,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Install Anthropic SDK
-        run: npm install @anthropic-ai/sdk --no-save
-
       - name: Get changed files
         id: changed
         run: |
@@ -50,10 +48,10 @@ jobs:
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "Changed files: $FILES"
 
-      - name: Resolve test files via Claude AI
+      - name: "🤖 AI selects relevant tests (Claude via OpenRouter)"
         id: resolve
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CHANGED_FILES: ${{ steps.changed.outputs.files }}

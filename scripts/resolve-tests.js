@@ -2,22 +2,21 @@
 /**
  * resolve-tests.js
  *
- * Uses Claude AI to read the PR git diff and intelligently select
- * the relevant Playwright E2E test files to run.
+ * Uses Claude AI via OpenRouter to analyse the PR git diff and
+ * intelligently select the relevant Playwright E2E test files to run.
  *
- * Usage (called by GitHub Actions):
- *   echo "<changed files>" | node scripts/resolve-tests.js
+ * Exit codes:
+ *   0  — success, test files printed to stdout
+ *   1  — AI call failed — pipeline is blocked intentionally
  *
  * Required env vars:
- *   ANTHROPIC_API_KEY   Anthropic API key
- *   BASE_SHA            Base commit SHA of the PR
- *   HEAD_SHA            Head commit SHA of the PR
- *
- * Output (stdout): space-separated list of test file paths
+ *   OPENROUTER_API_KEY   API key from openrouter.ai
+ *   BASE_SHA             Base commit SHA of the PR
+ *   HEAD_SHA             Head commit SHA of the PR
  */
 
+const https = require('https');
 const { execSync } = require('child_process');
-const Anthropic = require('@anthropic-ai/sdk');
 
 const AVAILABLE_TESTS = [
   'tests/e2e/auth.spec.js',
@@ -29,12 +28,53 @@ const AVAILABLE_TESTS = [
 
 const ALL_TESTS = AVAILABLE_TESTS.join(' ');
 
+function callOpenRouter(apiKey, prompt) {
+  return new Promise((resolve, reject) => {
+    const payload = JSON.stringify({
+      model: 'anthropic/claude-3.5-haiku',
+      messages: [{ role: 'user', content: prompt }],
+      max_tokens: 256,
+      temperature: 0,
+    });
+
+    const options = {
+      hostname: 'openrouter.ai',
+      path: '/api/v1/chat/completions',
+      method: 'POST',
+      headers: {
+        'Authorization': `Bearer ${apiKey}`,
+        'Content-Type': 'application/json',
+        'HTTP-Referer': 'https://github.com/Jyesh-collab/ecom',
+        'X-Title': 'Smart PR Testing Pipeline',
+        'Content-Length': Buffer.byteLength(payload),
+      },
+    };
+
+    const req = https.request(options, (res) => {
+      let body = '';
+      res.on('data', chunk => (body += chunk));
+      res.on('end', () => {
+        if (res.statusCode === 200) {
+          resolve(JSON.parse(body));
+        } else {
+          reject(new Error(`OpenRouter returned ${res.statusCode}: ${body}`));
+        }
+      });
+    });
+
+    req.on('error', reject);
+    req.write(payload);
+    req.end();
+  });
+}
+
 async function main() {
-  const apiKey = process.env.ANTHROPIC_API_KEY;
+  const apiKey = process.env.OPENROUTER_API_KEY;
+
   if (!apiKey) {
-    process.stderr.write('ANTHROPIC_API_KEY not set — running all tests as fallback\n');
-    process.stdout.write(ALL_TESTS + '\n');
-    process.exit(0);
+    process.stderr.write('\n❌ OPENROUTER_API_KEY is not set.\n');
+    process.stderr.write('Add it as a GitHub secret: Settings → Secrets → OPENROUTER_API_KEY\n\n');
+    process.exit(1);
   }
 
   // Get changed files from stdin or env
@@ -42,7 +82,6 @@ async function main() {
   try {
     changedFiles = require('fs').readFileSync('/dev/stdin', 'utf-8').trim();
   } catch {
-    // stdin not available on Windows CI — use env var set by workflow
     changedFiles = (process.env.CHANGED_FILES || '').replace(/,/g, '\n').trim();
   }
 
@@ -60,9 +99,8 @@ async function main() {
     try {
       gitDiff = execSync(
         `git diff ${baseSha} ${headSha} -- . ":(exclude)package-lock.json" ":(exclude)*.lock"`,
-        { maxBuffer: 500 * 1024 } // 500 KB max
+        { maxBuffer: 500 * 1024 }
       ).toString();
-      // Truncate if too large
       if (gitDiff.length > 80000) {
         gitDiff = gitDiff.slice(0, 80000) + '\n...[diff truncated]\n';
       }
@@ -70,8 +108,6 @@ async function main() {
       process.stderr.write(`Could not get git diff: ${e.message}\n`);
     }
   }
-
-  const client = new Anthropic({ apiKey });
 
   const prompt = `You are a QA engineer deciding which Playwright E2E tests to run for a pull request.
 
@@ -91,57 +127,63 @@ ${gitDiff || '(diff not available — use changed file names above)'}
 - tests/e2e/search.spec.js     → Search bar, Search results, Empty state, Keyword matching, Navigation logo
 
 ## Your task
-Select ONLY the test files that are relevant to the changed code. Rules:
-1. If auth routes, login/register components, JWT logic, or User model changed → include auth.spec.js
-2. If product routes, product model, ProductCard, ProductDetail, recommendations, or Pinecone changed → include products.spec.js
-3. If cart context, cart components, CartPage, or basket logic changed → include cart.spec.js
-4. If checkout routes, CheckoutForm, payment validation, or order logic changed → include checkout.spec.js
-5. If search routes, search components, NavigationBar, or search logic changed → include search.spec.js
-6. If global config files changed (package.json, index.js, App.jsx, setupProxy, Docker, CI/CD, k8s) → include ALL tests
-7. If only docs/README/comments changed → include NO tests (output empty string)
-8. When uncertain whether a change affects a feature, INCLUDE that test (false positives are safer than false negatives)
+Select ONLY the test files relevant to the changed code. Rules:
+1. Auth routes, login/register components, JWT, User model changed → auth.spec.js
+2. Product routes, ProductCard, ProductDetail, recommendations, Pinecone changed → products.spec.js
+3. Cart context, cart components, CartPage changed → cart.spec.js
+4. Checkout routes, CheckoutForm, payment validation changed → checkout.spec.js
+5. Search routes, search components, NavigationBar changed → search.spec.js
+6. Global config changed (package.json, index.js, App.jsx, Docker, CI/CD) → ALL tests
+7. Only docs/README/comments changed → empty array
+8. When uncertain, INCLUDE the test (false positives safer than false negatives)
 
-Respond with ONLY a JSON object in this exact format — no explanation, no markdown:
-{"tests": ["tests/e2e/auth.spec.js", "tests/e2e/products.spec.js"]}
+Respond with ONLY a JSON object — no explanation, no markdown:
+{"tests": ["tests/e2e/auth.spec.js"]}`;
 
-Use an empty array if truly no tests are relevant: {"tests": []}`;
+  process.stderr.write('🤖 Calling Claude AI via OpenRouter to analyse diff and select tests...\n');
 
   try {
-    const message = await client.messages.create({
-      model: 'claude-opus-4-7',
-      max_tokens: 256,
-      thinking: { type: 'adaptive' },
-      messages: [{ role: 'user', content: prompt }],
-    });
+    const response = await callOpenRouter(apiKey, prompt);
+    const raw = response.choices?.[0]?.message?.content?.trim();
 
-    // Extract the text content (skip thinking blocks)
-    const textBlock = message.content.find(b => b.type === 'text');
-    if (!textBlock) throw new Error('No text in Claude response');
+    if (!raw) throw new Error('Empty response from OpenRouter');
 
-    const raw = textBlock.text.trim();
-
-    // Parse JSON — Claude should return only JSON
     let parsed;
     try {
-      // Handle case where Claude wraps in markdown code block
       const jsonMatch = raw.match(/\{[\s\S]*\}/);
       parsed = JSON.parse(jsonMatch ? jsonMatch[0] : raw);
     } catch {
-      throw new Error(`Could not parse Claude response as JSON: ${raw}`);
+      throw new Error(`Claude returned non-JSON: ${raw}`);
     }
 
     const selected = (parsed.tests || []).filter(t => AVAILABLE_TESTS.includes(t));
 
     if (selected.length === 0) {
-      process.stderr.write('Claude selected no tests — running full suite as safety fallback\n');
+      process.stderr.write('⚠️  Claude selected no tests — running full suite as safety net\n');
       process.stdout.write(ALL_TESTS + '\n');
     } else {
-      process.stderr.write(`Claude selected: ${selected.join(', ')}\n`);
+      process.stderr.write(`✅ Claude selected: ${selected.join(', ')}\n`);
       process.stdout.write(selected.join(' ') + '\n');
     }
+
+    process.exit(0);
+
   } catch (err) {
-    process.stderr.write(`Claude API error: ${err.message} — falling back to all tests\n`);
-    process.stdout.write(ALL_TESTS + '\n');
+    process.stderr.write('\n❌ AI Test Intelligence Gate FAILED\n');
+    process.stderr.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    process.stderr.write(`Error: ${err.message}\n`);
+
+    if (err.message.includes('401') || err.message.includes('403')) {
+      process.stderr.write('\n👉 Invalid OPENROUTER_API_KEY.\n');
+      process.stderr.write('   Fix: Check the secret value in GitHub Settings → Secrets\n\n');
+    } else if (err.message.includes('402') || err.message.includes('credit') || err.message.includes('balance')) {
+      process.stderr.write('\n👉 Insufficient OpenRouter credits.\n');
+      process.stderr.write('   Fix: Go to https://openrouter.ai → Credits → Add credits\n\n');
+    }
+
+    process.stderr.write('━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n');
+    process.stderr.write('Pipeline blocked. Fix the AI issue and re-run.\n\n');
+    process.exit(1);
   }
 }
 
