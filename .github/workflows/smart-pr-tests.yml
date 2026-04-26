@@ -134,13 +134,17 @@ jobs:
         run: npm ci
         working-directory: backend
 
-      # Install Playwright as a dev dependency if not already present
-      - name: Install Playwright
-        run: npm install --save-dev @playwright/test
+      # Install Playwright and Allure reporter
+      - name: Install Playwright and Allure reporter
+        run: npm install --save-dev @playwright/test allure-playwright
 
       # Install Playwright browsers
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
+
+      # Install Allure CLI to generate HTML report from results
+      - name: Install Allure CLI
+        run: npm install -g allure-commandline --save-dev
 
       # Start backend — use MONGO_URI (matches backend/index.js)
       - name: "🚀 Start backend server"
@@ -201,6 +205,7 @@ jobs:
         id: playwright
         env:
           BASE_URL: ${{ env.BASE_URL }}
+          ALLURE_RESULTS_DIR: allure-results
         run: |
           TEST_FILES="${{ needs.detect-changes.outputs.test-files }}"
           if [ -z "$TEST_FILES" ]; then
@@ -209,7 +214,6 @@ jobs:
           fi
           echo "Running: npx playwright test $TEST_FILES"
           npx playwright test $TEST_FILES \
-            --reporter=list,json \
             --output=test-results 2>&1 | tee test-output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
         continue-on-error: true
@@ -231,11 +235,39 @@ jobs:
           echo "$FAILED" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: "📦 Upload Playwright report"
+      # Write environment info into the Allure report
+      - name: "📝 Write Allure environment info"
+        if: always()
+        run: |
+          mkdir -p allure-results
+          cat > allure-results/environment.properties << EOF
+          PR_Number=${{ github.event.pull_request.number }}
+          PR_Title=${{ github.event.pull_request.title }}
+          Branch=${{ github.head_ref }}
+          Commit=${{ github.event.pull_request.head.sha }}
+          Base_URL=http://localhost:3000
+          Node_Version=18
+          Browser=Chromium
+          EOF
+
+      # Generate Allure HTML report from raw results
+      - name: "📊 Generate Allure report"
+        if: always()
+        run: allure generate allure-results --clean -o allure-report
+
+      - name: "📦 Upload Allure report"
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-pr-${{ github.event.pull_request.number }}
+          name: allure-report-pr-${{ github.event.pull_request.number }}
+          path: allure-report/
+          retention-days: 14
+
+      - name: "📦 Upload Playwright raw results"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-pr-${{ github.event.pull_request.number }}
           path: |
             test-results/
             test-output.txt
