@@ -36,6 +36,7 @@ export default function ProductCard({ product, addToCart }) {
 
   return (
     <Card
+      data-testid="product-card"
       sx={{
         height: '100%',
         cursor: 'pointer',
@@ -123,7 +124,7 @@ export default function ProductCard({ product, addToCart }) {
             addToCart(product);
           }}
         >
-          Add to Cart
+          See me in cart
         </Button>
         <Tooltip title="See full specs" arrow>
           <Button

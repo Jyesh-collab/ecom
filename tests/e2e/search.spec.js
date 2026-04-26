@@ -15,7 +15,7 @@ test.describe('Search', () => {
     await searchBox.press('Enter');
     await expect(page).toHaveURL(/search|query|q=/i, { timeout: 8000 });
     await expect(
-      page.locator('[data-testid="product-card"], .product-card, [class*="ProductCard"]').first()
+      page.locator('[data-testid="product-card"]').first()
     ).toBeVisible({ timeout: 15000 });
   });
 
@@ -35,7 +35,7 @@ test.describe('Search', () => {
     await searchBox.fill('phone');
     await searchBox.press('Enter');
 
-    const cards = page.locator('[data-testid="product-card"], .product-card, [class*="ProductCard"]');
+    const cards = page.locator('[data-testid="product-card"]');
     await cards.first().waitFor({ timeout: 15000 });
     const count = await cards.count();
     expect(count).toBeGreaterThan(0);

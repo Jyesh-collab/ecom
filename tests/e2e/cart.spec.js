@@ -4,11 +4,11 @@ test.describe('Shopping Cart', () => {
   test.beforeEach(async ({ page }) => {
     // Land on shop, navigate to first product, add to cart
     await page.goto('/shop');
-    const firstCard = page.locator('[data-testid="product-card"], .product-card, [class*="ProductCard"]').first();
+    const firstCard = page.locator('[data-testid="product-card"]').first();
     await firstCard.waitFor({ timeout: 15000 });
     await firstCard.click();
-    await page.getByRole('button', { name: /add to cart/i }).waitFor({ timeout: 10000 });
-    await page.getByRole('button', { name: /add to cart/i }).click();
+    await page.getByRole('button', { name: /see me in cart/i }).waitFor({ timeout: 10000 });
+    await page.getByRole('button', { name: /see me in cart/i }).click();
   });
 
   test('adding a product updates cart badge count', async ({ page }) => {

@@ -2,11 +2,11 @@ const { test, expect } = require('@playwright/test');
 
 async function addProductToCart(page) {
   await page.goto('/shop');
-  const firstCard = page.locator('[data-testid="product-card"], .product-card, [class*="ProductCard"]').first();
+  const firstCard = page.locator('[data-testid="product-card"]').first();
   await firstCard.waitFor({ timeout: 15000 });
   await firstCard.click();
-  await page.getByRole('button', { name: /add to cart/i }).waitFor({ timeout: 10000 });
-  await page.getByRole('button', { name: /add to cart/i }).click();
+  await page.getByRole('button', { name: /see me in cart/i }).waitFor({ timeout: 10000 });
+  await page.getByRole('button', { name: /see me in cart/i }).click();
 }
 
 test.describe('Checkout Flow', () => {
