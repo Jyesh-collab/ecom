@@ -1,0 +1,150 @@
+{
+  "_comment": "Maps changed file glob patterns to Playwright E2E test files. Evaluated top-to-bottom; all matches are collected.",
+  "mappings": [
+    {
+      "pattern": "src/pages/Login.jsx",
+      "tests": ["tests/e2e/auth.spec.js"]
+    },
+    {
+      "pattern": "src/pages/Register.jsx",
+      "tests": ["tests/e2e/auth.spec.js"]
+    },
+    {
+      "pattern": "src/pages/ForgotPassword.jsx",
+      "tests": ["tests/e2e/auth.spec.js"]
+    },
+    {
+      "pattern": "src/pages/ResetPassword.jsx",
+      "tests": ["tests/e2e/auth.spec.js"]
+    },
+    {
+      "pattern": "backend/routes/auth.js",
+      "tests": ["tests/e2e/auth.spec.js"]
+    },
+    {
+      "pattern": "backend/models/user.js",
+      "tests": ["tests/e2e/auth.spec.js"]
+    },
+    {
+      "pattern": "src/pages/Shop.jsx",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "src/pages/ProductDetails.jsx",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "src/pages/Home.jsx",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "src/components/ProductCard.jsx",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "src/components/ProductListing.jsx",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "backend/routes/products.js",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "backend/models/product.js",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "backend/services/embeddingService.js",
+      "tests": ["tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "src/pages/Cart.jsx",
+      "tests": ["tests/e2e/cart.spec.js"]
+    },
+    {
+      "pattern": "src/components/ShoppingCart.jsx",
+      "tests": ["tests/e2e/cart.spec.js"]
+    },
+    {
+      "pattern": "src/pages/Checkout.jsx",
+      "tests": ["tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "src/components/CheckoutForm.jsx",
+      "tests": ["tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "backend/routes/checkout.js",
+      "tests": ["tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "backend/routes/orders.js",
+      "tests": ["tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "backend/models/order.js",
+      "tests": ["tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "src/pages/OrderSuccess.jsx",
+      "tests": ["tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "src/components/NavigationBar.jsx",
+      "tests": ["tests/e2e/search.spec.js", "tests/e2e/products.spec.js"]
+    },
+    {
+      "pattern": "src/components/SearchResults.jsx",
+      "tests": ["tests/e2e/search.spec.js"]
+    },
+    {
+      "pattern": "backend/routes/search.js",
+      "tests": ["tests/e2e/search.spec.js"]
+    },
+    {
+      "pattern": "src/services/apiClient.js",
+      "tests": [
+        "tests/e2e/auth.spec.js",
+        "tests/e2e/products.spec.js",
+        "tests/e2e/cart.spec.js",
+        "tests/e2e/checkout.spec.js",
+        "tests/e2e/search.spec.js"
+      ]
+    },
+    {
+      "pattern": "backend/middleware/auth.js",
+      "tests": ["tests/e2e/auth.spec.js", "tests/e2e/checkout.spec.js"]
+    },
+    {
+      "pattern": "src/App.jsx",
+      "tests": [
+        "tests/e2e/auth.spec.js",
+        "tests/e2e/products.spec.js",
+        "tests/e2e/cart.spec.js",
+        "tests/e2e/checkout.spec.js",
+        "tests/e2e/search.spec.js"
+      ]
+    },
+    {
+      "pattern": "backend/index.js",
+      "tests": [
+        "tests/e2e/auth.spec.js",
+        "tests/e2e/products.spec.js",
+        "tests/e2e/cart.spec.js",
+        "tests/e2e/checkout.spec.js",
+        "tests/e2e/search.spec.js"
+      ]
+    }
+  ],
+  "fallback": {
+    "description": "Run all tests when changed files match no specific mapping (e.g. config, infra changes)",
+    "patterns": ["package.json", "docker-compose.yml", ".env", "backend/config/"],
+    "tests": [
+      "tests/e2e/auth.spec.js",
+      "tests/e2e/products.spec.js",
+      "tests/e2e/cart.spec.js",
+      "tests/e2e/checkout.spec.js",
+      "tests/e2e/search.spec.js"
+    ]
+  }
+}

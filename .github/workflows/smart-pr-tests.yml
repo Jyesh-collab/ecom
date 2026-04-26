@@ -1,0 +1,337 @@
+name: Smart PR Testing Pipeline
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+concurrency:
+  group: smart-pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '18'
+  BASE_URL: 'http://localhost:3000'
+
+jobs:
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 1. Detect which files changed and resolve the relevant test files
+  # ─────────────────────────────────────────────────────────────────────────────
+  detect-changes:
+    name: Detect Changed Files & Resolve Tests
+    runs-on: ubuntu-latest
+    outputs:
+      test-files: ${{ steps.resolve.outputs.test-files }}
+      changed-files: ${{ steps.changed.outputs.files }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+
+      - name: Install Anthropic SDK
+        run: npm install @anthropic-ai/sdk --no-save
+
+      - name: Get changed files
+        id: changed
+        run: |
+          BASE=${{ github.event.pull_request.base.sha }}
+          HEAD=${{ github.event.pull_request.head.sha }}
+          FILES=$(git diff --name-only "$BASE" "$HEAD" | tr '\n' ',')
+          echo "files=$FILES" >> "$GITHUB_OUTPUT"
+          echo "Changed files: $FILES"
+
+      - name: Resolve test files via Claude AI
+        id: resolve
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHANGED_FILES: ${{ steps.changed.outputs.files }}
+        run: |
+          CHANGED="${{ steps.changed.outputs.files }}"
+          NEWLINE_FILES=$(echo "$CHANGED" | tr ',' '\n')
+          TEST_FILES=$(echo "$NEWLINE_FILES" | node scripts/resolve-tests.js)
+          echo "test-files=$TEST_FILES" >> "$GITHUB_OUTPUT"
+          echo "Claude selected test files: $TEST_FILES"
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 2. Post "Test automation triggered" comment on the PR
+  # ─────────────────────────────────────────────────────────────────────────────
+  notify-triggered:
+    name: Post Triggered Comment
+    runs-on: ubuntu-latest
+    needs: detect-changes
+
+    steps:
+      - name: Post triggered comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const testFiles = `${{ needs.detect-changes.outputs.test-files }}`;
+            const changedFiles = `${{ needs.detect-changes.outputs.changed-files }}`
+              .split(',').filter(Boolean);
+
+            const fileList = changedFiles.map(f => `  - \`${f}\``).join('\n');
+            const testList = testFiles.split(' ').filter(Boolean).map(t => `  - \`${t}\``).join('\n');
+
+            const body = [
+              '## 🤖 Test automation triggered',
+              '',
+              '**Changed files detected:**',
+              fileList,
+              '',
+              '**Tests selected for this PR:**',
+              testList,
+              '',
+              `> Workflow run: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 3. Start the app and run only the relevant Playwright tests
+  # ─────────────────────────────────────────────────────────────────────────────
+  run-tests:
+    name: Run Playwright E2E Tests
+    runs-on: ubuntu-latest
+    needs: [detect-changes, notify-triggered]
+
+    services:
+      mongodb:
+        image: mongo:6.0
+        ports:
+          - 27017:27017
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+
+      # Install frontend deps
+      - name: Install frontend dependencies
+        run: npm ci
+
+      # Install backend deps
+      - name: Install backend dependencies
+        run: npm ci
+        working-directory: backend
+
+      # Install Playwright + browsers
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium
+
+      # Start backend
+      - name: Start backend server
+        env:
+          MONGODB_URI: mongodb://localhost:27017/ecom_test
+          JWT_SECRET: test-secret-key-for-ci
+          PORT: 5000
+          NODE_ENV: test
+          # Vector DB keys are optional; app has fallback logic
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          PINECONE_HOST: ${{ secrets.PINECONE_HOST }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          cd backend
+          npm start &
+          # Wait until backend is healthy
+          for i in {1..30}; do
+            curl -sf http://localhost:5000/api/products && break || sleep 2
+          done
+
+      # Start frontend (CRACO)
+      - name: Start frontend dev server
+        env:
+          REACT_APP_API_URL: http://localhost:5000
+        run: |
+          npm start &
+          # Wait until React dev server is ready
+          for i in {1..30}; do
+            curl -sf http://localhost:3000 && break || sleep 2
+          done
+
+      # Run only the resolved test files
+      - name: Run Playwright tests
+        id: playwright
+        env:
+          BASE_URL: ${{ env.BASE_URL }}
+        run: |
+          TEST_FILES="${{ needs.detect-changes.outputs.test-files }}"
+          echo "Running: npx playwright test $TEST_FILES"
+          npx playwright test $TEST_FILES \
+            --reporter=list,json \
+            --output=test-results 2>&1 | tee test-output.txt
+          echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
+        continue-on-error: true
+
+      # Capture failed test names from JSON report
+      - name: Extract failed test names
+        id: failed-names
+        if: steps.playwright.outputs.exit_code != '0'
+        run: |
+          FAILED=$(node -e "
+            const r = require('./test-results/results.json');
+            const names = r.suites.flatMap(s =>
+              s.specs.filter(sp => sp.tests.some(t => t.status === 'failed' || t.status === 'timedOut'))
+                     .map(sp => sp.title)
+            );
+            console.log([...new Set(names)].join('\n'));
+          " 2>/dev/null || echo 'Could not parse results.json')
+          echo "names<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$FAILED" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-pr-${{ github.event.pull_request.number }}
+          path: |
+            test-results/
+            test-output.txt
+          retention-days: 14
+
+      # Expose exit code as a job output for downstream jobs
+      - name: Set test status output
+        id: test-status
+        if: always()
+        run: |
+          CODE=${{ steps.playwright.outputs.exit_code }}
+          echo "status=$( [ "$CODE" = "0" ] && echo success || echo failure )" >> "$GITHUB_OUTPUT"
+
+    outputs:
+      status: ${{ steps.test-status.outputs.status }}
+      failed-names: ${{ steps.failed-names.outputs.names }}
+      error-log: ${{ steps.playwright.outputs.exit_code }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4a. On FAILURE → create Jira defect and post link as PR comment
+  # ─────────────────────────────────────────────────────────────────────────────
+  on-failure:
+    name: Create Jira Defect & Notify
+    runs-on: ubuntu-latest
+    needs: [run-tests]
+    if: needs.run-tests.outputs.status == 'failure'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download test artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: playwright-report-pr-${{ github.event.pull_request.number }}
+          path: test-artifacts/
+
+      - name: Read error log
+        id: error-log
+        run: |
+          LOG=$(cat test-artifacts/test-output.txt 2>/dev/null | head -200 || echo 'No output captured')
+          echo "log<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$LOG" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Create Jira defect
+        id: jira
+        env:
+          JIRA_HOST: ${{ secrets.JIRA_HOST }}
+          JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
+          JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
+          JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
+          FAILED_TESTS: ${{ needs.run-tests.outputs.failed-names }}
+          ERROR_DETAILS: ${{ steps.error-log.outputs.log }}
+          WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          OUTPUT=$(node scripts/create-jira-defect.js)
+          echo "$OUTPUT"
+          JIRA_KEY=$(echo "$OUTPUT" | grep '^JIRA_ISSUE_KEY=' | cut -d= -f2)
+          JIRA_URL=$(echo "$OUTPUT" | grep '^JIRA_ISSUE_URL=' | cut -d= -f2)
+          echo "key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
+          echo "url=$JIRA_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Post failure comment with Jira link
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const jiraKey  = '${{ steps.jira.outputs.key }}';
+            const jiraUrl  = '${{ steps.jira.outputs.url }}';
+            const prNumber = context.issue.number;
+            const runUrl   = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const failedTests = `${{ needs.run-tests.outputs.failed-names }}`
+              .split('\n').filter(Boolean).map(t => `  - ${t}`).join('\n') || '  _(see report)_';
+
+            const body = [
+              '## ❌ E2E Tests Failed',
+              '',
+              '**Failed tests:**',
+              failedTests,
+              '',
+              `**Jira defect created:** [${jiraKey}](${jiraUrl})`,
+              '',
+              `**Full report:** [GitHub Actions Run](${runUrl})`,
+              '',
+              '_Please fix the failing tests before merging._',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: prNumber,
+              body,
+            });
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4b. On SUCCESS → post success comment
+  # ─────────────────────────────────────────────────────────────────────────────
+  on-success:
+    name: Post Success Comment
+    runs-on: ubuntu-latest
+    needs: [detect-changes, run-tests]
+    if: needs.run-tests.outputs.status == 'success'
+
+    steps:
+      - name: Post success comment
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const testFiles = `${{ needs.detect-changes.outputs.test-files }}`
+              .split(' ').filter(Boolean).map(t => `  - \`${t}\``).join('\n');
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
+            const body = [
+              '## ✅ All E2E Tests Passed',
+              '',
+              '**Tests executed:**',
+              testFiles,
+              '',
+              `**Report:** [GitHub Actions Run](${runUrl})`,
+              '',
+              '_This PR is clear for review and merge._',
+            ].join('\n');
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+              body,
+            });
