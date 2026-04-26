@@ -168,6 +168,12 @@ jobs:
           cat /tmp/backend.log 2>/dev/null || true
           exit 1
 
+      # Seed the test database with products so tests have data to work with
+      - name: "🌱 Seed test database"
+        env:
+          MONGO_URI: mongodb://localhost:27017/ecom_test
+        run: node scripts/seed-ci.js
+
       # Start frontend (CRACO) — REACT_APP_API_BASE_URL points to local backend
       - name: "🚀 Start frontend dev server"
         env:
