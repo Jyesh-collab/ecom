@@ -5,7 +5,7 @@
  * Uses the existing productSeeds.js — just wires up the DB connection.
  */
 
-const mongoose = require('./node_modules/mongoose');
+const mongoose = require('mongoose');
 const seedDB = require('./seed/productSeeds');
 
 const MONGO_URI = process.env.MONGO_URI || 'mongodb://localhost:27017/ecom_test';
