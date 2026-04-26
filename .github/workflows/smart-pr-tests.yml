@@ -125,7 +125,7 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Install frontend deps
+      # Install frontend deps (includes craco)
       - name: Install frontend dependencies
         run: npm ci
 
@@ -134,47 +134,72 @@ jobs:
         run: npm ci
         working-directory: backend
 
-      # Install Playwright + browsers
+      # Install Playwright as a dev dependency if not already present
+      - name: Install Playwright
+        run: npm install --save-dev @playwright/test
+
+      # Install Playwright browsers
       - name: Install Playwright browsers
         run: npx playwright install --with-deps chromium
 
-      # Start backend
-      - name: Start backend server
+      # Start backend — use MONGO_URI (matches backend/index.js)
+      - name: "🚀 Start backend server"
         env:
-          MONGODB_URI: mongodb://localhost:27017/ecom_test
+          MONGO_URI: mongodb://localhost:27017/ecom_test
           JWT_SECRET: test-secret-key-for-ci
           PORT: 5000
           NODE_ENV: test
-          # Vector DB keys are optional; app has fallback logic
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           PINECONE_HOST: ${{ secrets.PINECONE_HOST }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          cd backend
-          npm start &
-          # Wait until backend is healthy
+          cd backend && npm start &
+          echo "Waiting for backend to be ready..."
           for i in {1..30}; do
-            curl -sf http://localhost:5000/api/products && break || sleep 2
+            if curl -sf http://localhost:5000/api/products > /dev/null 2>&1; then
+              echo "✅ Backend is up (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — not ready yet, retrying in 2s..."
+            sleep 2
           done
+          echo "❌ Backend failed to start after 60 seconds"
+          echo "--- Backend process output ---"
+          cat /tmp/backend.log 2>/dev/null || true
+          exit 1
 
-      # Start frontend (CRACO)
-      - name: Start frontend dev server
+      # Start frontend (CRACO) — REACT_APP_API_BASE_URL points to local backend
+      - name: "🚀 Start frontend dev server"
         env:
-          REACT_APP_API_URL: http://localhost:5000
+          REACT_APP_API_BASE_URL: http://localhost:5000/api
+          CI: false
         run: |
-          npm start &
-          # Wait until React dev server is ready
+          npm start > /tmp/frontend.log 2>&1 &
+          echo "Waiting for frontend to be ready..."
           for i in {1..30}; do
-            curl -sf http://localhost:3000 && break || sleep 2
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "✅ Frontend is up (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — not ready yet, retrying in 2s..."
+            sleep 2
           done
+          echo "❌ Frontend failed to start after 60 seconds"
+          echo "--- Frontend process output ---"
+          cat /tmp/frontend.log || true
+          exit 1
 
       # Run only the resolved test files
-      - name: Run Playwright tests
+      - name: "🧪 Run Playwright tests"
         id: playwright
         env:
           BASE_URL: ${{ env.BASE_URL }}
         run: |
           TEST_FILES="${{ needs.detect-changes.outputs.test-files }}"
+          if [ -z "$TEST_FILES" ]; then
+            echo "❌ No test files resolved — cannot run tests"
+            exit 1
+          fi
           echo "Running: npx playwright test $TEST_FILES"
           npx playwright test $TEST_FILES \
             --reporter=list,json \
@@ -183,7 +208,7 @@ jobs:
         continue-on-error: true
 
       # Capture failed test names from JSON report
-      - name: Extract failed test names
+      - name: "📋 Extract failed test names"
         id: failed-names
         if: steps.playwright.outputs.exit_code != '0'
         run: |
@@ -199,7 +224,7 @@ jobs:
           echo "$FAILED" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Playwright report
+      - name: "📦 Upload Playwright report"
         if: always()
         uses: actions/upload-artifact@v4
         with:
@@ -209,13 +234,20 @@ jobs:
             test-output.txt
           retention-days: 14
 
-      # Expose exit code as a job output for downstream jobs
-      - name: Set test status output
+      # Expose exit code as a job output — this is what drives on-failure / on-success
+      - name: "🏁 Set final test status"
         id: test-status
         if: always()
         run: |
-          CODE=${{ steps.playwright.outputs.exit_code }}
-          echo "status=$( [ "$CODE" = "0" ] && echo success || echo failure )" >> "$GITHUB_OUTPUT"
+          CODE="${{ steps.playwright.outputs.exit_code }}"
+          if [ "$CODE" = "0" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "✅ All tests passed"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "❌ Tests failed — exit code: $CODE"
+            exit 1
+          fi
 
     outputs:
       status: ${{ steps.test-status.outputs.status }}
