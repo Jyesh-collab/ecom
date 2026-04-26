@@ -8,6 +8,11 @@ concurrency:
   group: smart-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
 env:
   NODE_VERSION: '18'
   BASE_URL: 'http://localhost:3000'
