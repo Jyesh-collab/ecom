@@ -1,4 +1,4 @@
-name: Smart PR Testing Pipeline
+name: AI-Powered Predictive QA Pipeline
 
 on:
   pull_request:
@@ -23,7 +23,7 @@ jobs:
   #    tests to run. This job MUST pass before anything else proceeds.
   # ─────────────────────────────────────────────────────────────────────────────
   detect-changes:
-    name: "🤖 AI Test Intelligence Gate"
+    name: "🧠 AI Risk Assessment Engine"
     runs-on: ubuntu-latest
     outputs:
       test-files: ${{ steps.resolve.outputs.test-files }}
@@ -66,7 +66,7 @@ jobs:
   # 2. Post "Test automation triggered" comment on the PR
   # ─────────────────────────────────────────────────────────────────────────────
   notify-triggered:
-    name: Post Triggered Comment
+    name: "📡 PR Trigger Notification"
     runs-on: ubuntu-latest
     needs: detect-changes
 
@@ -106,7 +106,7 @@ jobs:
   # 3. Start the app and run only the relevant Playwright tests
   # ─────────────────────────────────────────────────────────────────────────────
   run-tests:
-    name: Run Playwright E2E Tests
+    name: "⚙️ Intelligent Test Orchestrator"
     runs-on: ubuntu-latest
     needs: [detect-changes, notify-triggered]
 
@@ -320,7 +320,7 @@ jobs:
   # 4a. On FAILURE → create Jira defect and post link as PR comment
   # ─────────────────────────────────────────────────────────────────────────────
   on-failure:
-    name: Create Jira Defect & Notify
+    name: "🐛 AI Defect Detection Engine"
     runs-on: ubuntu-latest
     needs: [run-tests]
     if: always() && needs.run-tests.outputs.status == 'failure'
@@ -424,7 +424,7 @@ jobs:
   # 4b. On SUCCESS → post success comment
   # ─────────────────────────────────────────────────────────────────────────────
   on-success:
-    name: Post Success Comment
+    name: "✅ Quality Gate Verdict"
     runs-on: ubuntu-latest
     needs: [detect-changes, run-tests]
     if: always() && needs.run-tests.outputs.status == 'success'
