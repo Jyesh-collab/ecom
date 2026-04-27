@@ -327,6 +327,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download test artifacts
         uses: actions/download-artifact@v4
@@ -335,13 +337,29 @@ jobs:
           name: playwright-results-pr-${{ github.event.pull_request.number }}
           path: test-artifacts/
 
+      - name: Get git diff of PR changes
+        id: git-diff
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          git fetch origin "$BASE" "$HEAD" 2>/dev/null || true
+          DIFF=$(git diff "$BASE" "$HEAD" -- src/ backend/routes/ backend/models/ | head -300)
+          echo "diff<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$DIFF" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       - name: Read error log
         id: error-log
         run: |
-          LOG=$(cat test-artifacts/test-output.txt 2>/dev/null | head -200 || echo 'No output captured')
+          LOG=$(cat test-artifacts/test-output.txt 2>/dev/null | head -300 || echo 'No output captured')
           echo "log<<EOF" >> "$GITHUB_OUTPUT"
           echo "$LOG" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
       - name: Create Jira defect
         id: jira
@@ -350,12 +368,15 @@ jobs:
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
           FAILED_TESTS: ${{ needs.run-tests.outputs.failed-names }}
           ERROR_DETAILS: ${{ steps.error-log.outputs.log }}
+          GIT_DIFF: ${{ steps.git-diff.outputs.diff }}
+          ARTIFACTS_PATH: test-artifacts
           WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           OUTPUT=$(node scripts/create-jira-defect.js)

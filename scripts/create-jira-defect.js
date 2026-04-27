@@ -2,23 +2,16 @@
 /**
  * create-jira-defect.js
  *
- * Uses Claude AI (via OpenRouter) to:
- *  1. Analyze Playwright test failures and generate a structured bug report
- *  2. Search Jira for an existing open bug covering the same failures
- *  3. If duplicate found → add a comment linking the new PR to the existing bug
- *  4. If no duplicate → create a new well-structured Jira bug
- *
- * Required env vars:
- *   JIRA_HOST, JIRA_EMAIL, JIRA_API_TOKEN, JIRA_PROJECT_KEY, OPENROUTER_API_KEY
- *
- * Optional env vars (injected by workflow):
- *   PR_NUMBER, PR_TITLE, PR_URL, COMMIT_SHA
- *   FAILED_TESTS       Newline-separated list of failed test names
- *   ERROR_DETAILS      Full error output / stack trace
- *   WORKFLOW_RUN_URL   Link to the GitHub Actions run
+ * Claude AI reads the git diff + Playwright failures and writes a proper
+ * QA bug report — what changed, navigation steps, expected vs actual.
+ * Screenshots and videos from Playwright are attached directly to the Jira ticket.
+ * Deduplication: if the same bug is already open in Jira, adds a comment instead.
  */
 
 const https = require('https');
+const http = require('http');
+const fs = require('fs');
+const path = require('path');
 const url = require('url');
 
 const {
@@ -33,6 +26,8 @@ const {
   COMMIT_SHA = 'unknown',
   FAILED_TESTS = '',
   ERROR_DETAILS = '',
+  GIT_DIFF = '',
+  ARTIFACTS_PATH = 'test-artifacts',
   WORKFLOW_RUN_URL = '',
 } = process.env;
 
@@ -42,17 +37,45 @@ if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN || !JIRA_PROJECT_KEY) {
 }
 
 const failedTests = FAILED_TESTS ? FAILED_TESTS.split('\n').filter(Boolean) : [];
-const truncatedError = ERROR_DETAILS.length > 4000
-  ? ERROR_DETAILS.slice(0, 4000) + '\n...[truncated]'
-  : ERROR_DETAILS;
 
-// ─── Generic HTTPS request helper ────────────────────────────────────────────
+// ─── Find Playwright screenshots and videos ───────────────────────────────────
+function findArtifacts() {
+  const screenshots = [];
+  const videos = [];
+
+  if (!fs.existsSync(ARTIFACTS_PATH)) return { screenshots, videos };
+
+  function walk(dir) {
+    let entries;
+    try { entries = fs.readdirSync(dir); } catch { return; }
+    for (const entry of entries) {
+      const full = path.join(dir, entry);
+      const stat = fs.statSync(full);
+      if (stat.isDirectory()) {
+        walk(full);
+      } else if (entry.endsWith('.png') && !entry.includes('context')) {
+        screenshots.push(full);
+      } else if (entry.endsWith('.webm')) {
+        videos.push(full);
+      }
+    }
+  }
+
+  walk(ARTIFACTS_PATH);
+  // Return only failing test artifacts (limit to avoid huge uploads)
+  return {
+    screenshots: screenshots.filter(f => f.includes('failed') || f.includes('test-failed')).slice(0, 3),
+    videos: videos.slice(0, 2),
+  };
+}
+
+// ─── Generic HTTPS request ────────────────────────────────────────────────────
 function httpsRequest(options, body) {
   return new Promise((resolve, reject) => {
     const req = https.request(options, (res) => {
-      let data = '';
-      res.on('data', (chunk) => (data += chunk));
-      res.on('end', () => resolve({ status: res.statusCode, body: data }));
+      const chunks = [];
+      res.on('data', chunk => chunks.push(chunk));
+      res.on('end', () => resolve({ status: res.statusCode, body: Buffer.concat(chunks).toString() }));
     });
     req.on('error', reject);
     if (body) req.write(body);
@@ -60,7 +83,70 @@ function httpsRequest(options, body) {
   });
 }
 
-// ─── OpenRouter / Claude helper ───────────────────────────────────────────────
+// ─── Jira helpers ─────────────────────────────────────────────────────────────
+function jiraAuth() {
+  return `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`;
+}
+
+function jiraHost() {
+  return new url.URL(JIRA_HOST).hostname;
+}
+
+async function jiraRequest(apiPath, method, bodyObj) {
+  const payload = bodyObj ? JSON.stringify(bodyObj) : null;
+  const options = {
+    hostname: jiraHost(),
+    path: apiPath,
+    method,
+    headers: {
+      Authorization: jiraAuth(),
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+    },
+  };
+  return httpsRequest(options, payload);
+}
+
+// Upload a file as a Jira attachment
+async function uploadAttachment(issueKey, filePath) {
+  const fileContent = fs.readFileSync(filePath);
+  const fileName = path.basename(filePath);
+  const mimeType = fileName.endsWith('.webm') ? 'video/webm' : 'image/png';
+  const boundary = `Boundary${Date.now()}`;
+
+  const header = Buffer.from(
+    `--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${fileName}"\r\nContent-Type: ${mimeType}\r\n\r\n`
+  );
+  const footer = Buffer.from(`\r\n--${boundary}--\r\n`);
+  const body = Buffer.concat([header, fileContent, footer]);
+
+  return new Promise((resolve, reject) => {
+    const req = https.request({
+      hostname: jiraHost(),
+      path: `/rest/api/3/issue/${issueKey}/attachments`,
+      method: 'POST',
+      headers: {
+        Authorization: jiraAuth(),
+        'X-Atlassian-Token': 'no-check',
+        'Content-Type': `multipart/form-data; boundary=${boundary}`,
+        'Content-Length': body.length,
+      },
+    }, (res) => {
+      const chunks = [];
+      res.on('data', c => chunks.push(c));
+      res.on('end', () => {
+        if (res.statusCode === 200) resolve(JSON.parse(Buffer.concat(chunks).toString()));
+        else reject(new Error(`Attachment upload failed ${res.statusCode}: ${Buffer.concat(chunks).toString().slice(0, 200)}`));
+      });
+    });
+    req.on('error', reject);
+    req.write(body);
+    req.end();
+  });
+}
+
+// ─── Claude via OpenRouter ────────────────────────────────────────────────────
 async function callClaude(prompt, maxTokens = 1000) {
   if (!OPENROUTER_API_KEY) return null;
 
@@ -92,121 +178,97 @@ async function callClaude(prompt, maxTokens = 1000) {
   }
 }
 
-// ─── Jira API helpers ─────────────────────────────────────────────────────────
-function jiraAuth() {
-  return `Basic ${Buffer.from(`${JIRA_EMAIL}:${JIRA_API_TOKEN}`).toString('base64')}`;
-}
-
-function jiraOptions(path, method, contentLength) {
-  const parsed = new url.URL(`${JIRA_HOST}${path}`);
-  return {
-    hostname: parsed.hostname,
-    path: parsed.pathname + (parsed.search || ''),
-    method,
-    headers: {
-      Authorization: jiraAuth(),
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...(contentLength ? { 'Content-Length': contentLength } : {}),
-    },
-  };
-}
-
-// Search Jira for open bugs in this project matching keywords
-async function searchJiraForExistingBug(keywords) {
-  const keywordClause = keywords
-    .slice(0, 3)
-    .map(k => `summary ~ "${k.replace(/"/g, '')}"`)
-    .join(' OR ');
-
-  const jql = `project = "${JIRA_PROJECT_KEY}" AND issuetype = Bug AND status NOT IN (Done, Resolved, Closed) AND (${keywordClause}) ORDER BY created DESC`;
-  const encodedJql = encodeURIComponent(jql);
-  const path = `/rest/api/3/issue/search?jql=${encodedJql}&maxResults=5&fields=summary,description,status,key`;
-
-  try {
-    const res = await httpsRequest(jiraOptions(path, 'GET'), null);
-    if (res.status === 200) {
-      const data = JSON.parse(res.body);
-      return data.issues || [];
-    }
-    return [];
-  } catch (e) {
-    console.warn('Jira search failed:', e.message);
-    return [];
-  }
-}
-
-// ─── AI: Analyze failures ──────────────────────────────────────────────────────
+// ─── Step 1: AI analyzes diff + failures ─────────────────────────────────────
 async function analyzeFailures() {
-  const prompt = `You are a senior QA engineer writing a Jira bug report from automated Playwright E2E test failures.
+  const prompt = `You are a senior QA engineer writing a Jira bug report.
+You have two inputs: (1) the git diff showing what code changed in this PR, and (2) the Playwright test failures.
+Your job is to connect the dots — explain exactly what changed in the code and how it caused the tests to fail.
 
-Analyze the following test failure data and produce a structured bug report in JSON format.
-
-## PR Information
-- PR Number: #${PR_NUMBER}
-- PR Title: ${PR_TITLE}
-- PR URL: ${PR_URL}
-- Commit: ${COMMIT_SHA}
+## Git Diff (what the developer changed in this PR)
+${GIT_DIFF ? GIT_DIFF.slice(0, 3000) : 'Not available'}
 
 ## Failed Tests
-${failedTests.length > 0 ? failedTests.map((t, i) => `${i + 1}. ${t}`).join('\n') : 'No test names captured'}
+${failedTests.length > 0 ? failedTests.map((t, i) => `${i + 1}. ${t}`).join('\n') : 'See error details'}
 
-## Error Details / Stack Traces
-${truncatedError || 'No error details captured'}
+## Playwright Error Output
+${ERROR_DETAILS ? ERROR_DETAILS.slice(0, 2000) : 'Not available'}
 
-Return a JSON object with these exact fields:
+## PR Info
+PR #${PR_NUMBER}: ${PR_TITLE}
+
+Instructions:
+- Look at the git diff to find EXACTLY what changed (e.g. button text, API response, component)
+- Explain the bug in plain English: "The [element] was changed from '[old value]' to '[new value]'"
+- Write steps to reproduce using the ACTUAL navigation path the Playwright test took
+- Be specific with file names, button names, page URLs from the diff and test output
+
+Return JSON with these exact fields:
 {
-  "summary": "A concise one-line bug summary (max 200 chars)",
-  "whatIsBug": "Clear explanation of what the bug is — what changed in the product that caused failures",
-  "affectedComponent": "Which part of the application is affected (e.g. Cart Page, Checkout Flow)",
+  "summary": "One-line bug title mentioning what changed and where (max 200 chars)",
+  "whatChanged": "Exact description of the code change — e.g. 'Button text in Cart.jsx changed from Proceed to Checkout to AI is coming'",
+  "changedFile": "The file where the change was made e.g. src/pages/Cart.jsx",
+  "oldValue": "The original value before the change e.g. Proceed to Checkout",
+  "newValue": "The new value after the change e.g. AI is coming",
+  "affectedComponent": "Which page/component is affected e.g. Cart Page",
   "severity": "Critical | High | Medium | Low",
-  "stepsToReproduce": ["step 1", "step 2", "step 3"],
-  "expectedResult": "What the test expected to find",
-  "actualResult": "What actually happened",
-  "rootCauseHypothesis": "Most likely root cause based on the error messages",
-  "affectedTests": ["test name 1", "test name 2"],
-  "searchKeywords": ["2-3 short keywords to search for duplicates in Jira, e.g. Proceed to Checkout, Cart, checkout button"]
-}
-
-Be specific. Reference actual button names, page names, error messages from the data above.`;
+  "stepsToReproduce": ["Exact navigation steps the test took, e.g. Go to /shop", "Click on the first product card", "Click See me in cart button", "Navigate to /cart"],
+  "expectedResult": "What should be there — e.g. A button with text Proceed to Checkout is visible",
+  "actualResult": "What is actually there — e.g. The button reads AI is coming",
+  "searchKeywords": ["2-3 short keywords for Jira duplicate search"]
+}`;
 
   return callClaude(prompt, 1000);
 }
 
-// ─── AI: Deduplication check ──────────────────────────────────────────────────
-async function checkIsDuplicate(existingIssues, currentFailures) {
-  if (!existingIssues.length) return null;
+// ─── Step 2: Search Jira for duplicates ──────────────────────────────────────
+async function searchExistingBugs(keywords) {
+  const clauses = keywords.slice(0, 3)
+    .map(k => `summary ~ "${k.replace(/"/g, '')}"`)
+    .join(' OR ');
 
-  const issueList = existingIssues.map(i =>
-    `Key: ${i.key}\nSummary: ${i.fields.summary}\nStatus: ${i.fields.status?.name}`
-  ).join('\n\n');
+  const jql = encodeURIComponent(
+    `project = "${JIRA_PROJECT_KEY}" AND issuetype = Bug AND status NOT IN (Done, Resolved, Closed) AND (${clauses}) ORDER BY created DESC`
+  );
 
-  const prompt = `You are a QA engineer checking if a new test failure is already reported in Jira.
+  try {
+    const res = await jiraRequest(
+      `/rest/api/3/issue/search?jql=${jql}&maxResults=5&fields=summary,status,key`,
+      'GET'
+    );
+    if (res.status === 200) return JSON.parse(res.body).issues || [];
+  } catch (e) {
+    console.warn('Jira search failed:', e.message);
+  }
+  return [];
+}
 
-## Current Test Failures (new)
-${currentFailures.affectedTests?.join('\n') || failedTests.join('\n')}
+// ─── Step 3: AI deduplication check ──────────────────────────────────────────
+async function checkDuplicate(existingIssues, ai) {
+  if (!existingIssues.length || !ai) return null;
 
-What is the bug: ${currentFailures.whatIsBug}
-Affected component: ${currentFailures.affectedComponent}
+  const list = existingIssues.map(i => `Key: ${i.key}\nSummary: ${i.fields.summary}`).join('\n\n');
 
-## Existing Open Jira Bugs
-${issueList}
+  const result = await callClaude(`You are checking if a new Playwright test failure is already reported in Jira.
 
-Decide: is the current failure already covered by one of the existing bugs?
+New bug: ${ai.whatChanged}
+Affected component: ${ai.affectedComponent}
+
+Existing open bugs:
+${list}
 
 Return JSON:
 {
   "isDuplicate": true or false,
-  "matchingIssueKey": "QA-123 or null if no match",
-  "reason": "Brief explanation of why it is or is not a duplicate"
+  "matchingIssueKey": "EXP-123 or null",
+  "reason": "Brief explanation"
 }
 
-Only return isDuplicate: true if the existing bug clearly covers the SAME root cause and affected component. Different tests failing for different reasons = not duplicate.`;
+Only return isDuplicate: true if the existing bug is clearly the SAME root cause.`, 200);
 
-  return callClaude(prompt, 200);
+  return result;
 }
 
-// ─── Jira ADF helpers ─────────────────────────────────────────────────────────
+// ─── Jira ADF builders ────────────────────────────────────────────────────────
 const h = (level, text) => ({ type: 'heading', attrs: { level }, content: [{ type: 'text', text }] });
 const p = (text) => ({ type: 'paragraph', content: [{ type: 'text', text }] });
 const rule = () => ({ type: 'rule' });
@@ -234,91 +296,110 @@ function orderedList(items) {
 function codeBlock(text) {
   return {
     type: 'codeBlock',
-    attrs: { language: 'text' },
-    content: [{ type: 'text', text: text || 'No details captured.' }],
+    attrs: { language: 'diff' },
+    content: [{ type: 'text', text: text || 'No diff captured.' }],
   };
 }
 
-// ─── Build Jira ADF description ───────────────────────────────────────────────
+// ─── Build Jira description ───────────────────────────────────────────────────
 function buildDescription(ai) {
-  const content = [
-    h(2, '🤖 AI-Analyzed Defect — Smart PR Testing Pipeline'),
-    p('Automatically detected and analyzed by the QE Pipeline using Claude AI.'),
-    p('⚠️ AI-Generated: Root cause hypothesis should be verified by an engineer.'),
-    rule(),
-    h(3, '🐛 What Is the Bug'),
-    p(ai?.whatIsBug || `E2E tests failed during PR #${PR_NUMBER} validation. ${failedTests.length} test(s) failed.`),
-  ];
+  const content = [];
 
-  if (ai?.affectedComponent) {
-    content.push(h(3, '📍 Affected Component'));
-    content.push(p(ai.affectedComponent));
+  // AI disclaimer
+  content.push(p('⚠️ AI-Generated Analysis — Root cause and steps should be verified by an engineer before acting.'));
+  content.push(rule());
+
+  // What is the bug
+  content.push(h(2, '🐛 Bug Summary'));
+  content.push(p(ai?.whatChanged || `E2E tests failed during PR #${PR_NUMBER}. ${failedTests.length} test(s) failed.`));
+
+  if (ai?.changedFile) {
+    content.push(p(`📁 File changed: ${ai.changedFile}`));
+  }
+
+  if (ai?.oldValue && ai?.newValue) {
+    content.push(h(3, '🔄 What Changed'));
+    content.push(bulletList([
+      `Before: "${ai.oldValue}"`,
+      `After:  "${ai.newValue}"`,
+    ]));
+
+    if (GIT_DIFF) {
+      const relevantDiff = GIT_DIFF.split('\n')
+        .filter(l => l.startsWith('+') || l.startsWith('-') || l.startsWith('@@') || l.startsWith('diff'))
+        .slice(0, 30)
+        .join('\n');
+      content.push(codeBlock(relevantDiff));
+    }
   }
 
   content.push(rule());
-  content.push(h(3, '🔗 PR Details'));
-  content.push(bulletList([
-    `PR: #${PR_NUMBER} — ${PR_TITLE}`,
-    `PR URL: ${PR_URL}`,
-    `Commit SHA: ${COMMIT_SHA}`,
-    `Workflow Run: ${WORKFLOW_RUN_URL}`,
-  ]));
 
-  content.push(rule());
+  // Steps to reproduce
   content.push(h(3, '🔁 Steps to Reproduce'));
-  content.push(orderedList(ai?.stepsToReproduce?.length ? ai.stepsToReproduce : [
-    'Open the PR linked above',
-    'Check out the branch locally',
-    'Run: npx playwright test --headed',
-    'Observe the failure in the test output',
-  ]));
+  content.push(orderedList(
+    ai?.stepsToReproduce?.length ? ai.stepsToReproduce : [
+      'Open the PR branch locally',
+      'Run: npx playwright test --headed',
+      'Observe the failure',
+    ]
+  ));
 
   content.push(h(3, '✅ Expected Result'));
-  content.push(p(ai?.expectedResult || 'All E2E tests should pass with the correct UI elements present.'));
+  content.push(p(ai?.expectedResult || 'All E2E tests pass with the correct UI elements present.'));
 
   content.push(h(3, '❌ Actual Result'));
   content.push(p(ai?.actualResult || `${failedTests.length} test(s) failed.`));
 
   content.push(rule());
-  content.push(h(3, '🧪 Failed Tests'));
-  const tests = ai?.affectedTests?.length ? ai.affectedTests : failedTests;
-  content.push(tests.length ? bulletList(tests) : p('No individual test names captured.'));
 
-  if (ai?.rootCauseHypothesis) {
-    content.push(h(3, '🔍 Root Cause Hypothesis (AI-Generated)'));
-    content.push(p(ai.rootCauseHypothesis));
-  }
+  // Evidence
+  content.push(h(3, '📎 Evidence'));
+  content.push(p('Screenshots are attached directly to this ticket.'));
+  content.push(bulletList([
+    `🎥 Video recording: ${WORKFLOW_RUN_URL} → Artifacts → playwright-results-pr-${PR_NUMBER} → video.webm`,
+    `🔍 Playwright trace: download artifacts and run: npx playwright show-trace trace.zip`,
+  ]));
 
   content.push(rule());
-  content.push(h(3, '📋 Error Details'));
-  content.push(p('Download Playwright artifacts from the workflow run for screenshots, videos, and traces.'));
-  if (truncatedError) content.push(codeBlock(truncatedError.slice(0, 2000)));
+
+  // Small reference section
+  content.push(h(3, '🔗 Reference'));
+  content.push(bulletList([
+    `PR: #${PR_NUMBER} — ${PR_TITLE}`,
+    `PR URL: ${PR_URL}`,
+    `Commit: ${COMMIT_SHA.slice(0, 8)}`,
+    `Workflow: ${WORKFLOW_RUN_URL}`,
+  ]));
 
   return { version: 1, type: 'doc', content };
 }
 
-// ─── Build duplicate comment (ADF) ───────────────────────────────────────────
-function buildDuplicateComment(duplicateReason) {
+// ─── Build duplicate comment ──────────────────────────────────────────────────
+function buildDuplicateComment(ai, reason) {
   return {
     version: 1,
     type: 'doc',
     content: [
       h(3, `🔁 Same bug reproduced in PR #${PR_NUMBER}`),
-      p(`PR: ${PR_TITLE}`),
-      p(`PR URL: ${PR_URL}`),
-      p(`Commit: ${COMMIT_SHA}`),
-      p(`Workflow Run: ${WORKFLOW_RUN_URL}`),
+      p(ai?.whatChanged || 'Same test failures detected.'),
       rule(),
-      h(4, '🧪 Failed Tests in this PR'),
-      failedTests.length ? bulletList(failedTests) : p('See workflow run for details.'),
+      h(4, 'Failed Tests'),
+      failedTests.length ? bulletList(failedTests) : p('See workflow run.'),
       rule(),
-      p(`🤖 AI deduplication note: ${duplicateReason}`),
+      bulletList([
+        `PR: #${PR_NUMBER} — ${PR_TITLE}`,
+        `PR URL: ${PR_URL}`,
+        `Commit: ${COMMIT_SHA.slice(0, 8)}`,
+        `Workflow: ${WORKFLOW_RUN_URL}`,
+      ]),
+      p(`🤖 AI deduplication: ${reason}`),
     ],
   };
 }
 
-// ─── Jira: Create new issue ───────────────────────────────────────────────────
-async function createJiraIssue(description, summary) {
+// ─── Create Jira issue ────────────────────────────────────────────────────────
+async function createJiraIssue(summary, description) {
   const payload = JSON.stringify({
     fields: {
       project: { key: JIRA_PROJECT_KEY },
@@ -328,90 +409,124 @@ async function createJiraIssue(description, summary) {
     },
   });
 
-  const res = await httpsRequest(
-    jiraOptions('/rest/api/3/issue', 'POST', Buffer.byteLength(payload)),
-    payload
-  );
+  const res = await httpsRequest({
+    hostname: jiraHost(),
+    path: '/rest/api/3/issue',
+    method: 'POST',
+    headers: {
+      Authorization: jiraAuth(),
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+    },
+  }, payload);
 
   if (res.status === 201) return JSON.parse(res.body);
-  throw new Error(`Jira API returned ${res.status}: ${res.body}`);
+  throw new Error(`Jira API ${res.status}: ${res.body}`);
 }
 
-// ─── Jira: Add comment to existing issue ─────────────────────────────────────
-async function addJiraComment(issueKey, commentBody) {
-  const payload = JSON.stringify({ body: commentBody });
+// ─── Add comment to existing issue ───────────────────────────────────────────
+async function addComment(issueKey, body) {
+  const payload = JSON.stringify({ body });
+  const res = await httpsRequest({
+    hostname: jiraHost(),
+    path: `/rest/api/3/issue/${issueKey}/comment`,
+    method: 'POST',
+    headers: {
+      Authorization: jiraAuth(),
+      'Content-Type': 'application/json',
+      Accept: 'application/json',
+      'Content-Length': Buffer.byteLength(payload),
+    },
+  }, payload);
 
-  const res = await httpsRequest(
-    jiraOptions(`/rest/api/3/issue/${issueKey}/comment`, 'POST', Buffer.byteLength(payload)),
-    payload
-  );
+  if (res.status !== 201) throw new Error(`Comment API ${res.status}: ${res.body}`);
+}
 
-  if (res.status === 201) return JSON.parse(res.body);
-  throw new Error(`Jira comment API returned ${res.status}: ${res.body}`);
+// ─── Attach screenshots to Jira (videos linked, not attached — CTO decision) ──
+async function attachArtifacts(issueKey, artifacts) {
+  // Videos are NOT uploaded — Jira is not a video host.
+  // Video link is included in the ticket description pointing to GitHub artifacts.
+  const all = artifacts.screenshots;
+  if (all.length === 0) {
+    console.log('   No screenshots found to attach');
+    return;
+  }
+
+  for (const filePath of all) {
+    try {
+      const sizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
+      console.log(`   Attaching ${path.basename(filePath)} (${sizeMB}MB)...`);
+      await uploadAttachment(issueKey, filePath);
+      console.log(`   ✅ Attached: ${path.basename(filePath)}`);
+    } catch (e) {
+      console.warn(`   ⚠️  Could not attach ${path.basename(filePath)}: ${e.message}`);
+    }
+  }
 }
 
 // ─── Main ─────────────────────────────────────────────────────────────────────
 (async () => {
   try {
-    // Step 1: Analyze failures with Claude
-    console.log('🤖 Step 1: Analyzing test failures with Claude AI...');
+    // Step 1: Analyze
+    console.log('🤖 Step 1: Claude is analyzing git diff + test failures...');
     const ai = await analyzeFailures();
-
     if (ai) {
-      console.log(`✅ AI analysis complete — ${ai.affectedComponent} | Severity: ${ai.severity}`);
+      console.log(`✅ Bug identified: ${ai.whatChanged?.slice(0, 100)}`);
+      console.log(`   Component: ${ai.affectedComponent} | Severity: ${ai.severity}`);
     } else {
-      console.log('⚠️  AI analysis unavailable — using fallback report');
+      console.log('⚠️  AI unavailable — using fallback report');
     }
 
-    // Step 2: Search Jira for existing open bugs
+    // Step 2: Search for duplicates
     console.log('🔍 Step 2: Searching Jira for existing open bugs...');
-    const keywords = ai?.searchKeywords?.length
-      ? ai.searchKeywords
-      : failedTests.slice(0, 2);
+    const keywords = ai?.searchKeywords?.length ? ai.searchKeywords : failedTests.slice(0, 2);
+    const existing = await searchExistingBugs(keywords);
+    console.log(`   Found ${existing.length} potentially related open bug(s)`);
 
-    const existingIssues = await searchJiraForExistingBug(keywords);
-    console.log(`   Found ${existingIssues.length} potentially related open bug(s)`);
-
-    // Step 3: AI deduplication check
-    let duplicateResult = null;
-    if (existingIssues.length > 0 && ai) {
-      console.log('🤖 Step 3: Checking for duplicate with Claude AI...');
-      duplicateResult = await checkIsDuplicate(existingIssues, ai);
-
-      if (duplicateResult?.isDuplicate) {
-        console.log(`✅ Duplicate detected: ${duplicateResult.matchingIssueKey}`);
-        console.log(`   Reason: ${duplicateResult.reason}`);
+    // Step 3: Deduplication
+    let duplicate = null;
+    if (existing.length && ai) {
+      console.log('🤖 Step 3: Checking for duplicate...');
+      duplicate = await checkDuplicate(existing, ai);
+      if (duplicate?.isDuplicate) {
+        console.log(`✅ Duplicate: ${duplicate.matchingIssueKey} — ${duplicate.reason}`);
       } else {
-        console.log('✅ No duplicate found — will create new bug');
+        console.log('✅ Not a duplicate — creating new bug');
       }
-    } else {
-      console.log('ℹ️  Step 3: Skipped (no existing bugs found)');
     }
 
-    // Step 4: Either comment on duplicate or create new bug
-    if (duplicateResult?.isDuplicate && duplicateResult?.matchingIssueKey) {
-      console.log(`📝 Step 4: Adding comment to existing bug ${duplicateResult.matchingIssueKey}...`);
-      const commentBody = buildDuplicateComment(duplicateResult.reason);
-      await addJiraComment(duplicateResult.matchingIssueKey, commentBody);
+    // Step 4: Find Playwright artifacts
+    console.log('📁 Step 4: Finding Playwright screenshots and videos...');
+    const artifacts = findArtifacts();
+    console.log(`   Found ${artifacts.screenshots.length} screenshot(s), ${artifacts.videos.length} video(s)`);
 
-      const issueUrl = `${JIRA_HOST}/browse/${duplicateResult.matchingIssueKey}`;
-      console.log(`✅ Comment added to existing bug: ${duplicateResult.matchingIssueKey}`);
-      console.log(`JIRA_ISSUE_KEY=${duplicateResult.matchingIssueKey}`);
-      console.log(`JIRA_ISSUE_URL=${issueUrl}`);
+    // Step 5: Create or update Jira
+    let issueKey;
+    if (duplicate?.isDuplicate && duplicate?.matchingIssueKey) {
+      console.log(`📝 Step 5: Adding comment to existing bug ${duplicate.matchingIssueKey}...`);
+      await addComment(duplicate.matchingIssueKey, buildDuplicateComment(ai, duplicate.reason));
+      issueKey = duplicate.matchingIssueKey;
+      console.log(`✅ Comment added to ${issueKey}`);
     } else {
-      console.log('📝 Step 4: Creating new Jira bug...');
+      console.log('📝 Step 5: Creating new Jira bug...');
       const summary = ai?.summary
-        ? ai.summary.slice(0, 255)
-        : `[PR #${PR_NUMBER}] E2E test failure: ${PR_TITLE}`.slice(0, 255);
+        ? ai.summary
+        : `[PR #${PR_NUMBER}] E2E failure: ${PR_TITLE}`.slice(0, 255);
 
-      const description = buildDescription(ai);
-      const issue = await createJiraIssue(description, summary);
-      const issueUrl = `${JIRA_HOST}/browse/${issue.key}`;
-
-      console.log(`✅ New Jira bug created: ${issue.key}`);
-      console.log(`JIRA_ISSUE_KEY=${issue.key}`);
-      console.log(`JIRA_ISSUE_URL=${issueUrl}`);
+      const issue = await createJiraIssue(summary, buildDescription(ai));
+      issueKey = issue.key;
+      console.log(`✅ Created: ${issueKey}`);
     }
+
+    // Step 6: Attach screenshots and videos
+    console.log(`📎 Step 6: Attaching screenshots and videos to ${issueKey}...`);
+    await attachArtifacts(issueKey, artifacts);
+
+    const issueUrl = `${JIRA_HOST}/browse/${issueKey}`;
+    console.log(`\n🎉 Done! Jira bug: ${issueUrl}`);
+    console.log(`JIRA_ISSUE_KEY=${issueKey}`);
+    console.log(`JIRA_ISSUE_URL=${issueUrl}`);
 
   } catch (err) {
     console.error('❌ Failed:', err.message);
