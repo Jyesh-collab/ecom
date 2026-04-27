@@ -125,9 +125,15 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Install frontend deps — include devDependencies (craco lives there)
+      # Install frontend deps — workspaces flag ensures root devDeps are installed
       - name: Install frontend dependencies
-        run: npm ci --include=dev
+        run: npm ci --include=dev --ignore-scripts=false
+        env:
+          NODE_ENV: development
+
+      # Explicitly install craco in case workspace hoisting skipped it
+      - name: Install craco
+        run: npm install --save-dev @craco/craco --legacy-peer-deps
         env:
           NODE_ENV: development
 
