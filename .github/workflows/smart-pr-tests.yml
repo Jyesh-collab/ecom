@@ -131,9 +131,9 @@ jobs:
         env:
           NODE_ENV: development
 
-      # Install backend deps — cached separately
+      # Install backend deps — use npm install to match frontend approach
       - name: Install backend dependencies
-        run: npm ci
+        run: npm install --legacy-peer-deps
         working-directory: backend
 
       # Cache Playwright browsers — only re-downloads when Playwright version changes
