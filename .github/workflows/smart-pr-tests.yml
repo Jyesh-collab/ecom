@@ -330,8 +330,9 @@ jobs:
 
       - name: Download test artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          name: playwright-report-pr-${{ github.event.pull_request.number }}
+          name: playwright-results-pr-${{ github.event.pull_request.number }}
           path: test-artifacts/
 
       - name: Read error log
