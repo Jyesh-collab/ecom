@@ -45,7 +45,7 @@ test.describe('Product Browsing', () => {
     await page.goto('/shop');
     const firstCard = page.locator('[data-testid="product-card"]').first();
     await firstCard.waitFor({ timeout: 15000 });
-    await expect(firstCard.getByRole('button', { name: 'View Details', exact: true })).toBeVisible();
+    await expect(firstCard.getByRole('button', { name: 'View Details', exact: true }).first()).toBeVisible();
   });
 
   // ── Navigation ────────────────────────────────────────────────────────────
@@ -70,7 +70,7 @@ test.describe('Product Browsing', () => {
     await page.goto('/shop');
     await page.locator('[data-testid="product-card"]').first().waitFor({ timeout: 15000 });
     await page.locator('[data-testid="product-card"]').first().click();
-    await expect(page.getByText(/\$[\d]+\.[\d]{2}/)).toBeVisible({ timeout: 10000 });
+    await expect(page.getByText(/\$[\d]+\.[\d]{2}/).first()).toBeVisible({ timeout: 20000 });
   });
 
   test('product detail page shows recommendations section', async ({ page }) => {

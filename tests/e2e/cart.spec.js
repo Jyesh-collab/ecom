@@ -33,7 +33,8 @@ test.describe('Shopping Cart', () => {
 
   test('"Continue shopping" button exists with exact text', async ({ page }) => {
     await addProductToCart(page);
-    await expect(page.getByRole('button', { name: 'Continue shopping', exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: 'Continue shopping', exact: true }).first()).toBeVisible({ timeout: 10000 });
+
   });
 
   test('checkout button has exact text "Proceed to Checkout"', async ({ page }) => {
@@ -86,7 +87,7 @@ test.describe('Shopping Cart', () => {
 
   test('"Continue shopping" button navigates back to /shop', async ({ page }) => {
     await addProductToCart(page);
-    await page.getByRole('button', { name: 'Continue shopping', exact: true }).click();
+    await page.getByRole('button', { name: 'Continue shopping', exact: true }).first().click();
     await expect(page).toHaveURL(/\/shop/, { timeout: 8000 });
   });
 
