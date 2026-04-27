@@ -125,9 +125,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Install frontend deps — NODE_ENV=development ensures devDeps (craco) are installed
+      # npm install (not ci) — npm workspaces + npm ci skips root devDeps (craco, playwright)
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install --legacy-peer-deps
         env:
           NODE_ENV: development
 
