@@ -36,7 +36,31 @@ if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN || !JIRA_PROJECT_KEY) {
   process.exit(1);
 }
 
-const failedTests = FAILED_TESTS ? FAILED_TESTS.split('\n').filter(Boolean) : [];
+// Parse failed tests from FAILED_TESTS env var, or extract from ERROR_DETAILS log
+function extractFailedTests() {
+  if (FAILED_TESTS && FAILED_TESTS.trim()) {
+    return FAILED_TESTS.split('\n').filter(Boolean);
+  }
+  // Fallback: parse Playwright output lines with ✘ symbol
+  if (ERROR_DETAILS) {
+    const lines = ERROR_DETAILS.split('\n');
+    const failed = [];
+    for (const line of lines) {
+      // Match lines like: ✘   5 [chromium] › tests/e2e/cart.spec.js:40:3 › Shopping Cart › checkout button...
+      const match = line.match(/✘.*?›\s+(.+?)\s+\(\d+/);
+      if (match) {
+        const name = match[1].trim();
+        if (!name.includes('retry') && !failed.includes(name)) {
+          failed.push(name);
+        }
+      }
+    }
+    return failed;
+  }
+  return [];
+}
+
+const failedTests = extractFailedTests();
 
 // ─── Find Playwright screenshots and videos ───────────────────────────────────
 function findArtifacts() {

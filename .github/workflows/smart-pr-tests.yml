@@ -342,11 +342,13 @@ jobs:
         run: |
           BASE="${{ github.event.pull_request.base.sha }}"
           HEAD="${{ github.event.pull_request.head.sha }}"
-          git fetch origin "$BASE" "$HEAD" 2>/dev/null || true
-          DIFF=$(git diff "$BASE" "$HEAD" -- src/ backend/routes/ backend/models/ | head -300)
+          git fetch --depth=50 origin "$BASE" "$HEAD" 2>/dev/null || \
+            git fetch --depth=50 origin "${{ github.event.pull_request.base.ref }}" "${{ github.head_ref }}" 2>/dev/null || true
+          DIFF=$(git diff "$BASE" "$HEAD" -- src/ backend/routes/ backend/models/ 2>/dev/null | head -300 || echo '')
           echo "diff<<EOF" >> "$GITHUB_OUTPUT"
           echo "$DIFF" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Git diff lines: $(echo "$DIFF" | wc -l)"
 
       - name: Read error log
         id: error-log
