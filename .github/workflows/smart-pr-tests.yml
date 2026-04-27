@@ -125,15 +125,9 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Install frontend deps — workspaces flag ensures root devDeps are installed
+      # Install frontend deps — NODE_ENV=development ensures devDeps (craco) are installed
       - name: Install frontend dependencies
-        run: npm ci --include=dev --ignore-scripts=false
-        env:
-          NODE_ENV: development
-
-      # Explicitly install craco in case workspace hoisting skipped it
-      - name: Install craco
-        run: npm install --save-dev @craco/craco --legacy-peer-deps
+        run: npm ci
         env:
           NODE_ENV: development
 
@@ -214,7 +208,7 @@ jobs:
           REACT_APP_API_BASE_URL: http://localhost:5000/api
           CI: false
         run: |
-          npm start > /tmp/frontend.log 2>&1 &
+          npx craco start > /tmp/frontend.log 2>&1 &
           echo "Waiting for frontend to be ready..."
           for i in {1..30}; do
             if curl -sf http://localhost:3000 > /dev/null 2>&1; then
