@@ -125,9 +125,11 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Install frontend deps — cached by setup-node using package-lock.json hash
+      # Install frontend deps — include devDependencies (craco lives there)
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm ci --include=dev
+        env:
+          NODE_ENV: development
 
       # Install backend deps — cached separately
       - name: Install backend dependencies
