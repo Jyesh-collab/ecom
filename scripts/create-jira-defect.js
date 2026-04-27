@@ -133,9 +133,9 @@ async function jiraRequest(apiPath, method, bodyObj) {
 }
 
 // Upload a file as a Jira attachment
-async function uploadAttachment(issueKey, filePath) {
+async function uploadAttachment(issueKey, filePath, displayName) {
   const fileContent = fs.readFileSync(filePath);
-  const fileName = path.basename(filePath);
+  const fileName = displayName || path.basename(filePath);
   const mimeType = fileName.endsWith('.webm') ? 'video/webm' : 'image/png';
   const boundary = `Boundary${Date.now()}`;
 
@@ -477,14 +477,16 @@ async function attachArtifacts(issueKey, artifacts) {
     return;
   }
 
-  for (const filePath of all) {
+  for (let i = 0; i < all.length; i++) {
+    const filePath = all[i];
+    const displayName = `screenshot-${i + 1}.png`;
     try {
       const sizeMB = (fs.statSync(filePath).size / 1024 / 1024).toFixed(1);
-      console.log(`   Attaching ${path.basename(filePath)} (${sizeMB}MB)...`);
-      await uploadAttachment(issueKey, filePath);
-      console.log(`   ✅ Attached: ${path.basename(filePath)}`);
+      console.log(`   Attaching ${displayName} (${sizeMB}MB) from ${path.basename(path.dirname(filePath))}...`);
+      await uploadAttachment(issueKey, filePath, displayName);
+      console.log(`   ✅ Attached: ${displayName}`);
     } catch (e) {
-      console.warn(`   ⚠️  Could not attach ${path.basename(filePath)}: ${e.message}`);
+      console.warn(`   ⚠️  Could not attach ${displayName}: ${e.message}`);
     }
   }
 }

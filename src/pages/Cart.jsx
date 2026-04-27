@@ -84,7 +84,7 @@ function Cart({ cart, setCart }) {
                 Continue shopping
               </Button>
               <Button variant="contained" onClick={handleCheckout}>
-                AI is coming
+                Proceed to checkout
               </Button>
             </Stack>
           </Box>
