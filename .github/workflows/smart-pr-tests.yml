@@ -127,7 +127,7 @@ jobs:
 
       # npm install (not ci) — npm workspaces + npm ci skips root devDeps (craco, playwright)
       - name: Install frontend dependencies
-        run: npm install --legacy-peer-deps
+        run: npm install
         env:
           NODE_ENV: development
 
