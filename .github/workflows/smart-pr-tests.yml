@@ -1,4 +1,4 @@
-name: AI-Powered Predictive QA Pipeline
+name: AI-Powered Predictive QE Pipeline
 
 on:
   pull_request:
