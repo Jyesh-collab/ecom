@@ -84,7 +84,7 @@ function Cart({ cart, setCart }) {
                 Continue shopping
               </Button>
               <Button variant="contained" onClick={handleCheckout}>
-                I am Here
+                Diwakar
               </Button>
             </Stack>
           </Box>
