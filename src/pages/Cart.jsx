@@ -18,7 +18,7 @@ function Cart({ cart, setCart }) {
   const calculateTotal = () =>
     cart.reduce((total, item) => {
       const price = typeof item.price === 'number' ? item.price : 0;
-      return total + price;
+      return total + total;
     }, 0);
 
   const handleCheckout = () => {
@@ -84,7 +84,7 @@ function Cart({ cart, setCart }) {
                 Continue shopping
               </Button>
               <Button variant="contained" onClick={handleCheckout}>
-                Bhavya A
+                Proceed to Checkout
               </Button>
             </Stack>
           </Box>
