@@ -1,4 +1,4 @@
-name: Smart PR Testing Pipeline
+name: AI-Powered Predictive QE Pipeline
 
 on:
   pull_request:
@@ -8,16 +8,22 @@ concurrency:
   group: smart-pr-${{ github.event.pull_request.number }}
   cancel-in-progress: true
 
+permissions:
+  pull-requests: write
+  issues: write
+  contents: read
+
 env:
   NODE_VERSION: '18'
   BASE_URL: 'http://localhost:3000'
 
 jobs:
   # ─────────────────────────────────────────────────────────────────────────────
-  # 1. Detect which files changed and resolve the relevant test files
+  # 1. AI Test Intelligence Gate — Claude analyses the diff and decides which
+  #    tests to run. This job MUST pass before anything else proceeds.
   # ─────────────────────────────────────────────────────────────────────────────
   detect-changes:
-    name: Detect Changed Files & Resolve Tests
+    name: "🧠 AI Risk Assessment Engine"
     runs-on: ubuntu-latest
     outputs:
       test-files: ${{ steps.resolve.outputs.test-files }}
@@ -33,9 +39,6 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
-      - name: Install Anthropic SDK
-        run: npm install @anthropic-ai/sdk --no-save
-
       - name: Get changed files
         id: changed
         run: |
@@ -45,10 +48,10 @@ jobs:
           echo "files=$FILES" >> "$GITHUB_OUTPUT"
           echo "Changed files: $FILES"
 
-      - name: Resolve test files via Claude AI
+      - name: "🤖 AI selects relevant tests (Claude via OpenRouter)"
         id: resolve
         env:
-          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CHANGED_FILES: ${{ steps.changed.outputs.files }}
@@ -63,7 +66,7 @@ jobs:
   # 2. Post "Test automation triggered" comment on the PR
   # ─────────────────────────────────────────────────────────────────────────────
   notify-triggered:
-    name: Post Triggered Comment
+    name: "📡 PR Trigger Notification"
     runs-on: ubuntu-latest
     needs: detect-changes
 
@@ -103,7 +106,7 @@ jobs:
   # 3. Start the app and run only the relevant Playwright tests
   # ─────────────────────────────────────────────────────────────────────────────
   run-tests:
-    name: Run Playwright E2E Tests
+    name: "⚙️ Intelligent Test Orchestrator"
     runs-on: ubuntu-latest
     needs: [detect-changes, notify-triggered]
 
@@ -122,65 +125,124 @@ jobs:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
 
-      # Install frontend deps
+      # npm install (not ci) — npm workspaces + npm ci skips root devDeps (craco, playwright)
       - name: Install frontend dependencies
-        run: npm ci
+        run: npm install
+        env:
+          NODE_ENV: development
 
-      # Install backend deps
+      # Install backend deps — use npm install to match frontend approach
       - name: Install backend dependencies
-        run: npm ci
+        run: npm install --legacy-peer-deps
         working-directory: backend
 
-      # Install Playwright + browsers
+      # Cache Playwright browsers — only re-downloads when Playwright version changes
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        id: playwright-cache
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # Install Playwright browsers only if cache miss
       - name: Install Playwright browsers
+        if: steps.playwright-cache.outputs.cache-hit != 'true'
         run: npx playwright install --with-deps chromium
 
-      # Start backend
-      - name: Start backend server
+      # Install browser system deps even on cache hit (OS-level deps not cached)
+      - name: Install Playwright system dependencies
+        if: steps.playwright-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # Cache Allure CLI — only re-downloads when version changes
+      - name: Cache Allure CLI
+        uses: actions/cache@v4
+        id: allure-cache
+        with:
+          path: ~/.npm-global
+          key: allure-cli-${{ runner.os }}-2.27.0
+
+      # Install Allure CLI only if cache miss
+      - name: Install Allure CLI
+        if: steps.allure-cache.outputs.cache-hit != 'true'
+        run: |
+          npm install -g allure-commandline
+          mkdir -p ~/.npm-global
+
+      # Start backend — use MONGO_URI (matches backend/index.js)
+      - name: "🚀 Start backend server"
         env:
-          MONGODB_URI: mongodb://localhost:27017/ecom_test
+          MONGO_URI: mongodb://localhost:27017/ecom_test
           JWT_SECRET: test-secret-key-for-ci
           PORT: 5000
           NODE_ENV: test
-          # Vector DB keys are optional; app has fallback logic
           PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
           PINECONE_HOST: ${{ secrets.PINECONE_HOST }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: |
-          cd backend
-          npm start &
-          # Wait until backend is healthy
+          cd backend && npm start &
+          echo "Waiting for backend to be ready..."
           for i in {1..30}; do
-            curl -sf http://localhost:5000/api/products && break || sleep 2
+            if curl -sf http://localhost:5000/api/products > /dev/null 2>&1; then
+              echo "✅ Backend is up (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — not ready yet, retrying in 2s..."
+            sleep 2
           done
+          echo "❌ Backend failed to start after 60 seconds"
+          echo "--- Backend process output ---"
+          cat /tmp/backend.log 2>/dev/null || true
+          exit 1
 
-      # Start frontend (CRACO)
-      - name: Start frontend dev server
+      # Seed the test database with products so tests have data to work with
+      - name: "🌱 Seed test database"
         env:
-          REACT_APP_API_URL: http://localhost:5000
+          MONGO_URI: mongodb://localhost:27017/ecom_test
+        run: node seed-ci.js
+        working-directory: backend
+
+      # Start frontend (CRACO) — REACT_APP_API_BASE_URL points to local backend
+      - name: "🚀 Start frontend dev server"
+        env:
+          REACT_APP_API_BASE_URL: http://localhost:5000/api
+          CI: false
         run: |
-          npm start &
-          # Wait until React dev server is ready
+          npx craco start > /tmp/frontend.log 2>&1 &
+          echo "Waiting for frontend to be ready..."
           for i in {1..30}; do
-            curl -sf http://localhost:3000 && break || sleep 2
+            if curl -sf http://localhost:3000 > /dev/null 2>&1; then
+              echo "✅ Frontend is up (attempt $i)"
+              exit 0
+            fi
+            echo "  attempt $i/30 — not ready yet, retrying in 2s..."
+            sleep 2
           done
+          echo "❌ Frontend failed to start after 60 seconds"
+          echo "--- Frontend process output ---"
+          cat /tmp/frontend.log || true
+          exit 1
 
       # Run only the resolved test files
-      - name: Run Playwright tests
+      - name: "🧪 Run Playwright tests"
         id: playwright
         env:
           BASE_URL: ${{ env.BASE_URL }}
+          ALLURE_RESULTS_DIR: allure-results
         run: |
           TEST_FILES="${{ needs.detect-changes.outputs.test-files }}"
+          if [ -z "$TEST_FILES" ]; then
+            echo "❌ No test files resolved — cannot run tests"
+            exit 1
+          fi
           echo "Running: npx playwright test $TEST_FILES"
           npx playwright test $TEST_FILES \
-            --reporter=list,json \
             --output=test-results 2>&1 | tee test-output.txt
           echo "exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
         continue-on-error: true
 
       # Capture failed test names from JSON report
-      - name: Extract failed test names
+      - name: "📋 Extract failed test names"
         id: failed-names
         if: steps.playwright.outputs.exit_code != '0'
         run: |
@@ -196,23 +258,58 @@ jobs:
           echo "$FAILED" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
-      - name: Upload Playwright report
+      # Write environment info into the Allure report
+      - name: "📝 Write Allure environment info"
+        if: always()
+        run: |
+          mkdir -p allure-results
+          cat > allure-results/environment.properties << EOF
+          PR_Number=${{ github.event.pull_request.number }}
+          PR_Title=${{ github.event.pull_request.title }}
+          Branch=${{ github.head_ref }}
+          Commit=${{ github.event.pull_request.head.sha }}
+          Base_URL=http://localhost:3000
+          Node_Version=18
+          Browser=Chromium
+          EOF
+
+      # Generate Allure HTML report from raw results
+      - name: "📊 Generate Allure report"
+        if: always()
+        run: npx allure generate allure-results --clean -o allure-report
+
+      - name: "📦 Upload Allure report"
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: playwright-report-pr-${{ github.event.pull_request.number }}
+          name: allure-report-pr-${{ github.event.pull_request.number }}
+          path: allure-report/
+          retention-days: 14
+
+      - name: "📦 Upload Playwright raw results"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-results-pr-${{ github.event.pull_request.number }}
           path: |
             test-results/
             test-output.txt
           retention-days: 14
 
-      # Expose exit code as a job output for downstream jobs
-      - name: Set test status output
+      # Expose exit code as a job output — this is what drives on-failure / on-success
+      - name: "🏁 Set final test status"
         id: test-status
         if: always()
         run: |
-          CODE=${{ steps.playwright.outputs.exit_code }}
-          echo "status=$( [ "$CODE" = "0" ] && echo success || echo failure )" >> "$GITHUB_OUTPUT"
+          CODE="${{ steps.playwright.outputs.exit_code }}"
+          if [ "$CODE" = "0" ]; then
+            echo "status=success" >> "$GITHUB_OUTPUT"
+            echo "✅ All tests passed"
+          else
+            echo "status=failure" >> "$GITHUB_OUTPUT"
+            echo "❌ Tests failed — exit code: $CODE"
+            exit 1
+          fi
 
     outputs:
       status: ${{ steps.test-status.outputs.status }}
@@ -223,27 +320,48 @@ jobs:
   # 4a. On FAILURE → create Jira defect and post link as PR comment
   # ─────────────────────────────────────────────────────────────────────────────
   on-failure:
-    name: Create Jira Defect & Notify
+    name: "🐛 AI Defect Detection Engine"
     runs-on: ubuntu-latest
     needs: [run-tests]
-    if: needs.run-tests.outputs.status == 'failure'
+    if: always() && needs.run-tests.outputs.status == 'failure'
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download test artifacts
         uses: actions/download-artifact@v4
+        continue-on-error: true
         with:
-          name: playwright-report-pr-${{ github.event.pull_request.number }}
+          name: playwright-results-pr-${{ github.event.pull_request.number }}
           path: test-artifacts/
+
+      - name: Get git diff of PR changes
+        id: git-diff
+        run: |
+          BASE="${{ github.event.pull_request.base.sha }}"
+          HEAD="${{ github.event.pull_request.head.sha }}"
+          git fetch --depth=50 origin "$BASE" "$HEAD" 2>/dev/null || \
+            git fetch --depth=50 origin "${{ github.event.pull_request.base.ref }}" "${{ github.head_ref }}" 2>/dev/null || true
+          DIFF=$(git diff "$BASE" "$HEAD" -- src/ backend/routes/ backend/models/ 2>/dev/null | head -300 || echo '')
+          echo "diff<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$DIFF" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Git diff lines: $(echo "$DIFF" | wc -l)"
 
       - name: Read error log
         id: error-log
         run: |
-          LOG=$(cat test-artifacts/test-output.txt 2>/dev/null | head -200 || echo 'No output captured')
+          LOG=$(cat test-artifacts/test-output.txt 2>/dev/null | head -300 || echo 'No output captured')
           echo "log<<EOF" >> "$GITHUB_OUTPUT"
           echo "$LOG" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
 
       - name: Create Jira defect
         id: jira
@@ -252,12 +370,15 @@ jobs:
           JIRA_EMAIL: ${{ secrets.JIRA_EMAIL }}
           JIRA_API_TOKEN: ${{ secrets.JIRA_API_TOKEN }}
           JIRA_PROJECT_KEY: ${{ secrets.JIRA_PROJECT_KEY }}
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_TITLE: ${{ github.event.pull_request.title }}
           PR_URL: ${{ github.event.pull_request.html_url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
           FAILED_TESTS: ${{ needs.run-tests.outputs.failed-names }}
           ERROR_DETAILS: ${{ steps.error-log.outputs.log }}
+          GIT_DIFF: ${{ steps.git-diff.outputs.diff }}
+          ARTIFACTS_PATH: test-artifacts
           WORKFLOW_RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           OUTPUT=$(node scripts/create-jira-defect.js)
@@ -303,10 +424,10 @@ jobs:
   # 4b. On SUCCESS → post success comment
   # ─────────────────────────────────────────────────────────────────────────────
   on-success:
-    name: Post Success Comment
+    name: "✅ Quality Gate Verdict"
     runs-on: ubuntu-latest
     needs: [detect-changes, run-tests]
-    if: needs.run-tests.outputs.status == 'success'
+    if: always() && needs.run-tests.outputs.status == 'success'
 
     steps:
       - name: Post success comment
