@@ -33,12 +33,12 @@ test.describe('Product Browsing', () => {
     await expect(firstCard.getByText(/\$[\d]+\.[\d]{2}/)).toBeVisible();
   });
 
-  test('product card "See me in cart" button has exact text', async ({ page }) => {
+  test('product card "Add to Cart" button has exact text', async ({ page }) => {
     await page.goto('/shop');
     const firstCard = page.locator('[data-testid="product-card"]').first();
     await firstCard.waitFor({ timeout: 15000 });
     // STRICT — catches "Add to Cart", "Buy Now", "AI is coming", any other text change
-    await expect(firstCard.getByRole('button', { name: 'See me in cart', exact: true })).toBeVisible();
+    await expect(firstCard.getByRole('button', { name: 'Add to Cart', exact: true })).toBeVisible();
   });
 
   test('product card "View Details" button has exact text', async ({ page }) => {
@@ -58,12 +58,12 @@ test.describe('Product Browsing', () => {
   });
 
   // ── Product Detail Page UI Text ───────────────────────────────────────────
-  test('product detail page shows "See me in cart" button with exact text', async ({ page }) => {
+  test('product detail page shows "Add to Cart" button with exact text', async ({ page }) => {
     await page.goto('/shop');
     await page.locator('[data-testid="product-card"]').first().waitFor({ timeout: 15000 });
     await page.locator('[data-testid="product-card"]').first().click();
     // STRICT — any change to this button text is caught
-    await expect(page.getByRole('button', { name: 'See me in cart', exact: true })).toBeVisible({ timeout: 10000 });
+    await expect(page.getByRole('button', { name: 'Add to Cart', exact: true })).toBeVisible({ timeout: 10000 });
   });
 
   test('product detail page shows price', async ({ page }) => {

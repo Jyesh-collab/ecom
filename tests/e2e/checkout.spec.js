@@ -5,8 +5,8 @@ async function addProductToCart(page) {
   const firstCard = page.locator('[data-testid="product-card"]').first();
   await firstCard.waitFor({ timeout: 15000 });
   await firstCard.click();
-  await expect(page.getByRole('button', { name: 'See me in cart', exact: true })).toBeVisible({ timeout: 10000 });
-  await page.getByRole('button', { name: 'See me in cart', exact: true }).click();
+  await expect(page.getByRole('button', { name: 'Add to Cart', exact: true })).toBeVisible({ timeout: 10000 });
+  await page.getByRole('button', { name: 'Add to Cart', exact: true }).click();
 }
 
 test.describe('Checkout Flow', () => {

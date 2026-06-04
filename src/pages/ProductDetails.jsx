@@ -319,7 +319,7 @@ function ProductDetails({ addToCart }) {
             </Box>
 
             <Button variant="contained" color="primary" onClick={handleAddToCart} sx={{ mt: 2 }}>
-              See me in cart
+              Add to Cart - Jyesh
             </Button>
           </Grid>
         </Grid>

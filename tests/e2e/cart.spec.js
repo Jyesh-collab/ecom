@@ -7,8 +7,8 @@ async function addProductToCart(page) {
   await firstCard.waitFor({ timeout: 15000 });
   await firstCard.click();
   // Exact button text — any change here will fail the test
-  await expect(page.getByRole('button', { name: 'See me in cart' })).toBeVisible({ timeout: 10000 });
-  await page.getByRole('button', { name: 'See me in cart' }).click();
+  await expect(page.getByRole('button', { name: 'Add to Cart' })).toBeVisible({ timeout: 10000 });
+  await page.getByRole('button', { name: 'Add to Cart' }).click();
   await page.goto('/cart');
 }
 
@@ -54,7 +54,7 @@ test.describe('Shopping Cart', () => {
     const firstCard = page.locator('[data-testid="product-card"]').first();
     await firstCard.waitFor({ timeout: 15000 });
     await firstCard.click();
-    await page.getByRole('button', { name: 'See me in cart' }).click();
+    await page.getByRole('button', { name: 'Add to Cart' }).click();
     const badge = page.locator('[data-testid="cart-badge"], [aria-label*="cart"]');
     await expect(badge.first()).toBeVisible({ timeout: 5000 });
   });

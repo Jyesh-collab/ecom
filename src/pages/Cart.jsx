@@ -18,7 +18,7 @@ function Cart({ cart, setCart }) {
   const calculateTotal = () =>
     cart.reduce((total, item) => {
       const price = typeof item.price === 'number' ? item.price : 0;
-      return total + total;
+      return total + price;
     }, 0);
 
   const handleCheckout = () => {

@@ -235,7 +235,7 @@ Return JSON with these exact fields:
   "newValue": "The new value after the change e.g. AI is coming",
   "affectedComponent": "Which page/component is affected e.g. Cart Page",
   "severity": "Critical | High | Medium | Low",
-  "stepsToReproduce": ["Exact navigation steps the test took, e.g. Go to /shop", "Click on the first product card", "Click See me in cart button", "Navigate to /cart"],
+  "stepsToReproduce": ["Exact navigation steps the test took, e.g. Go to /shop", "Click on the first product card", "Click Add to Cart button", "Navigate to /cart"],
   "expectedResult": "What should be there — e.g. A button with text Proceed to Checkout is visible",
   "actualResult": "What is actually there — e.g. The button reads AI is coming",
   "searchKeywords": ["2-3 short keywords for Jira duplicate search"]
