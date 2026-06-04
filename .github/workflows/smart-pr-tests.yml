@@ -411,14 +411,16 @@ jobs:
           HEAD="${{ github.event.pull_request.head.sha }}"
           git fetch --depth=50 origin "$BASE" "$HEAD" 2>/dev/null || \
             git fetch --depth=50 origin "${{ github.event.pull_request.base.ref }}" "${{ github.head_ref }}" 2>/dev/null || true
-          # FIX #3: Capture ALL source changes — not just src/ — so Claude always has context
-          # Exclude lockfiles and generated files that add noise without signal
+          # Capture src/ and backend/ changes for Claude context.
+          # Exclude tests/ — test file diffs are noise in a product bug report.
+          # Use head -c (character budget) not head -n (line count) so a PR with many
+          # files doesn't exhaust the budget before reaching the file that actually broke.
           DIFF=$(git diff "$BASE" "$HEAD" \
-            -- src/ backend/ tests/ \
+            -- src/ backend/ \
             ":(exclude)package-lock.json" \
             ":(exclude)*.lock" \
             ":(exclude)*.min.js" \
-            2>/dev/null | head -500 || echo '')
+            2>/dev/null | head -c 10000 || echo '')
           echo "diff<<EOF" >> "$GITHUB_OUTPUT"
           echo "$DIFF" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"

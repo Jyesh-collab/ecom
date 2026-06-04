@@ -63,7 +63,12 @@ function extractFailedTests() {
 }
 
 const failedTests = extractFailedTests();
-const failedSpecFiles = FAILED_SPECS.split('\n').filter(Boolean);
+// GitHub Actions URL-encodes newlines to %0A when passing multiline outputs via ${{ }}
+// Split on both real newlines and the encoded form so grouping always sees individual spec paths
+const failedSpecFiles = FAILED_SPECS
+  .replace(/%0A/gi, '\n')
+  .split('\n')
+  .filter(Boolean);
 
 // ─── Group failures by root cause (changed source file) ──────────────────────
 // Each group = one Jira ticket
@@ -762,6 +767,24 @@ function validateAI(ai, group) {
     console.log(`\n${'━'.repeat(60)}`);
     console.log(`🎉 Done — ${createdTickets.length} Jira ticket(s) created/updated:`);
     createdTickets.forEach(t => console.log(`   ${t.key}  ${t.url}`));
+
+    // ── CTO sanity check: every failing spec must be covered by a ticket ──────
+    // If any spec slipped through with no ticket, the pipeline gave a false sense
+    // of completeness — which is MORE dangerous than having no pipeline at all.
+    if (failedSpecFiles.length > 0) {
+      const coveredSpecs = new Set(
+        groups.flatMap(g => g.specFiles.map(s => path.basename(s)))
+      );
+      const missed = failedSpecFiles.filter(f => !coveredSpecs.has(path.basename(f)));
+      if (missed.length > 0) {
+        console.error(`\n❌ COVERAGE GAP — ${missed.length} failing spec(s) have NO Jira ticket:`);
+        missed.forEach(f => console.error(`   • ${f}`));
+        console.error('   A real bug was caught but not reported. Exiting 1 to surface this miss.');
+        process.exit(1);
+      } else {
+        console.log(`\n✅ Coverage check passed — all ${failedSpecFiles.length} failing spec(s) have a ticket`);
+      }
+    }
 
   } catch (err) {
     console.error('❌ Failed:', err.message);
