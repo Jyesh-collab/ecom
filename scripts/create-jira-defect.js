@@ -29,6 +29,8 @@ const {
   GIT_DIFF = '',
   ARTIFACTS_PATH = 'test-artifacts',
   WORKFLOW_RUN_URL = '',
+  GRAPH_OUTPUT = '',    // JSON string from build-dependency-graph.js
+  FAILED_SPECS  = '',   // Newline-separated spec file paths that actually failed
 } = process.env;
 
 if (!JIRA_HOST || !JIRA_EMAIL || !JIRA_API_TOKEN || !JIRA_PROJECT_KEY) {
@@ -61,6 +63,85 @@ function extractFailedTests() {
 }
 
 const failedTests = extractFailedTests();
+const failedSpecFiles = FAILED_SPECS.split('\n').filter(Boolean);
+
+// ─── Group failures by root cause (changed source file) ──────────────────────
+// Each group = one Jira ticket
+function groupFailuresBySource() {
+  let graph = {};
+  try { graph = JSON.parse(GRAPH_OUTPUT); } catch {}
+
+  // No graph available → one catch-all group covering all failures
+  if (Object.keys(graph).length === 0) {
+    return [{
+      sourceFile : null,
+      specFiles  : failedSpecFiles.length > 0 ? failedSpecFiles : ['see error log'],
+      isUntraced : true,
+    }];
+  }
+
+  const groups      = [];
+  const coveredBases = new Set(); // spec basenames already claimed by a group
+
+  for (const [sourceFile, data] of Object.entries(graph)) {
+    const suggested = data.suggestedTests || [];
+
+    // Match suggested specs against the specs that actually failed
+    const failedForThis = suggested.filter(spec => {
+      const specBase = path.basename(spec);
+      return failedSpecFiles.some(f => path.basename(f) === specBase || f.includes(specBase) || spec.includes(path.basename(f)));
+    });
+
+    if (failedForThis.length > 0) {
+      groups.push({ sourceFile, specFiles: [...new Set(failedForThis)] });
+      failedForThis.forEach(s => coveredBases.add(path.basename(s)));
+    }
+  }
+
+  // Catch-all: failed specs not traced to any changed file
+  const uncovered = failedSpecFiles.filter(f => !coveredBases.has(path.basename(f)));
+  if (uncovered.length > 0) {
+    groups.push({ sourceFile: null, specFiles: uncovered, isUntraced: true });
+  }
+
+  // Nothing grouped at all → single catch-all
+  if (groups.length === 0) {
+    return [{
+      sourceFile : null,
+      specFiles  : failedSpecFiles.length > 0 ? failedSpecFiles : ['see error log'],
+      isUntraced : true,
+    }];
+  }
+
+  return groups;
+}
+
+// ─── Extract the diff section for one specific source file ───────────────────
+function filterDiffForFile(fullDiff, sourceFile) {
+  if (!fullDiff)     return '';
+  if (!sourceFile)   return fullDiff.slice(0, 4000);
+
+  const normalTarget = sourceFile.replace(/\\/g, '/');
+  const lines    = fullDiff.split('\n');
+  const sections = [];
+  let current    = [];
+  let inSection  = false;
+
+  for (const line of lines) {
+    if (line.startsWith('diff --git')) {
+      if (inSection && current.length) sections.push(current.join('\n'));
+      current   = [line];
+      inSection = line.replace(/\\/g, '/').includes(normalTarget);
+    } else {
+      current.push(line);
+    }
+  }
+  if (inSection && current.length) sections.push(current.join('\n'));
+
+  const result = sections.join('\n');
+  // Fall back to full diff if file not found in diff (e.g. backend file)
+  return result || fullDiff.slice(0, 4000);
+}
 
 // ─── Find Playwright screenshots and videos ───────────────────────────────────
 function findArtifacts() {
@@ -255,55 +336,68 @@ function productFallbackWhatChanged() {
     : `${failedTests.length} E2E test(s) failed. Manual investigation required.`;
 }
 
-// ─── Step 1: AI analyzes diff + failures ─────────────────────────────────────
-async function analyzeFailures() {
-  // FIX #4: Take last 3000 chars of error log — that's where actual failures are
-  const errorSnippet = ERROR_DETAILS
-    ? ERROR_DETAILS.slice(-3000)
-    : 'Not available';
+// ─── Step 1: AI analyzes one group (one changed source file → its failing specs) ─
+async function analyzeFailures(group) {
+  const { sourceFile, specFiles } = group;
 
-  // FIX #4: Increase diff window to 6000 chars
-  const diffSnippet = GIT_DIFF
-    ? GIT_DIFF.slice(0, 6000)
-    : 'Not available';
+  // Extract only this file's portion of the diff
+  const diffSnippet  = filterDiffForFile(GIT_DIFF, sourceFile) || 'Not available';
 
-  const prompt = `You are a senior QA engineer writing a Jira bug report.
-You have two inputs: (1) the git diff showing what code changed in this PR, and (2) the Playwright test failures.
-Your job is to connect the dots — explain exactly what changed in the CODE and how it broke the PRODUCT for real users.
+  // Last 3000 chars of error log — that's where the actual failure messages appear
+  const errorSnippet = ERROR_DETAILS ? ERROR_DETAILS.slice(-3000) : 'Not available';
 
-## Git Diff (what the developer changed)
+  // Map spec files to human-readable product area descriptions for Claude
+  const SPEC_AREAS = {
+    'auth.spec.js'     : 'Authentication — Login, Register, Forgot Password pages',
+    'products.spec.js' : 'Product Browsing — Shop page, Product cards, Product detail, Recommendations',
+    'cart.spec.js'     : 'Shopping Cart — Add/remove items, Cart total, Checkout button',
+    'checkout.spec.js' : 'Checkout Flow — Payment form, Card validation, Order submission',
+    'search.spec.js'   : 'Search and Navigation — Search bar, Nav links, Search results',
+  };
+  const specContext = specFiles.map(s => {
+    const base = path.basename(s);
+    return `• ${s}  →  ${SPEC_AREAS[base] || base}`;
+  }).join('\n');
+
+  const prompt = `You are a senior QA engineer writing ONE Jira bug report for ONE specific code change.
+
+## The Source File That Changed
+${sourceFile || 'Unknown — see git diff below'}
+
+## Git Diff For This Specific File
+\`\`\`diff
 ${diffSnippet}
+\`\`\`
 
-## Failed Tests
-${failedTests.length > 0 ? failedTests.map((t, i) => `${i + 1}. ${t}`).join('\n') : 'See error details below'}
+## Product Areas Broken By This Change
+${specContext}
 
-## Playwright Error Output (last portion — this is where the actual failure message is)
+## Playwright Failure Output
 ${errorSnippet}
 
 ## PR Info
 PR #${PR_NUMBER}: ${PR_TITLE}
 
-CRITICAL RULES — you must follow all of these:
-1. Write everything in PRODUCT language. Never say "E2E test failed" or "Playwright" or "CI". Say "Button text changed", "API returns wrong status", "Page does not load".
-2. The summary MUST describe what broke for the user — e.g. "Checkout button text changed from 'Proceed to Checkout' to 'I am Here' breaking cart flow" NOT "[PR #2] E2E failure".
-3. stepsToReproduce must be browser navigation steps a human tester follows — not test code.
-4. Extract EXACT values from the git diff for oldValue and newValue. Do not guess.
-5. If multiple files changed, list all of them comma-separated in changedFile.
-6. ALL fields are required. Never return null for any field. Use your best judgment if unsure.
+CRITICAL RULES:
+1. PRODUCT language only. Never write "E2E test", "Playwright", "spec file", "CI", or "test failure".
+2. Summary = what broke for the USER in this specific file. E.g. "Add to Cart button text changed from 'Add to Cart' to 'See me in cart' in ProductCard.jsx"
+3. stepsToReproduce = browser steps a human tester follows — not code.
+4. oldValue / newValue = exact text from the git diff minus/plus lines. Do NOT guess.
+5. ALL fields required — never null.
 
-Return JSON with these exact fields — every field must have a real non-null value:
+Return JSON — every field must be populated:
 {
-  "summary": "Product-language title: what broke and where. Max 200 chars. No mention of E2E, Playwright, or CI.",
-  "whatChanged": "Exact description: 'Button text in [file] changed from [old] to [new]' or 'API endpoint [x] now returns [y] instead of [z]'",
-  "changedFile": "All changed source files comma-separated e.g. src/components/ProductCard.jsx,src/pages/Cart.jsx",
-  "oldValue": "The original value(s) before the change — extracted directly from the git diff minus lines",
-  "newValue": "The new value(s) after the change — extracted directly from the git diff plus lines",
-  "affectedComponent": "Product area affected e.g. Shopping Cart, Checkout Flow, Product Listing, Authentication",
+  "summary": "One product-language bug title for THIS file's change. Max 200 chars.",
+  "whatChanged": "Exact: '[element] in [file] changed from [old] to [new]'",
+  "changedFile": "${sourceFile || 'see git diff'}",
+  "oldValue": "Exact value from diff minus (−) lines",
+  "newValue": "Exact value from diff plus (+) lines",
+  "affectedComponent": "Shopping Cart | Checkout Flow | Product Listing | Authentication | Search and Navigation",
   "severity": "Critical | High | Medium | Low",
-  "stepsToReproduce": ["Go to /shop", "Click on a product card", "Click the Add to Cart button", "Go to /cart", "Click Proceed to Checkout"],
-  "expectedResult": "What a user should see — e.g. A clearly labelled button 'Proceed to Checkout' is visible on the cart page",
-  "actualResult": "What a user actually sees — e.g. The button reads 'I am Here' which is confusing and breaks test assertions",
-  "searchKeywords": ["2-3 short product-domain keywords for duplicate search e.g. checkout button cart"]
+  "stepsToReproduce": ["Go to /page", "Do action", "Observe result"],
+  "expectedResult": "What the user should see",
+  "actualResult": "What the user actually sees after this change",
+  "searchKeywords": ["2-3 short product-domain keywords"]
 }`;
 
   return callClaude(prompt, 1000);
@@ -556,89 +650,118 @@ async function attachArtifacts(issueKey, artifacts) {
   }
 }
 
-// ─── Main ─────────────────────────────────────────────────────────────────────
+// ─── Validate AI output fields — fill blanks with product-language fallbacks ──
+function validateAI(ai, group) {
+  if (!ai) return null;
+  const bad = v => !v || (typeof v === 'string' && (v.toLowerCase().includes('e2e') || v.toLowerCase().includes('playwright')));
+
+  if (bad(ai.summary))        ai.summary        = productFallbackSummary();
+  if (!ai.whatChanged)        ai.whatChanged     = productFallbackWhatChanged();
+  if (!ai.changedFile)        ai.changedFile     = group.sourceFile || 'See git diff';
+  if (!ai.oldValue)           ai.oldValue        = 'See git diff (− lines)';
+  if (!ai.newValue)           ai.newValue        = 'See git diff (+ lines)';
+  if (!ai.affectedComponent)  ai.affectedComponent = 'See affected test areas';
+  if (!ai.severity)           ai.severity        = 'High';
+  if (!Array.isArray(ai.stepsToReproduce) || !ai.stepsToReproduce.length) {
+    ai.stepsToReproduce = [
+      'Open the application in a browser',
+      'Navigate to the page affected by this change',
+      'Perform the action described in "What Changed"',
+      'Observe the incorrect behaviour',
+    ];
+  }
+  if (!ai.expectedResult) ai.expectedResult = 'Product behaves as designed with correct UI text and functionality';
+  if (!ai.actualResult)   ai.actualResult   = productFallbackWhatChanged();
+  if (!Array.isArray(ai.searchKeywords) || !ai.searchKeywords.length) {
+    ai.searchKeywords = group.specFiles.map(s => path.basename(s).replace('.spec.js', '')).slice(0, 2);
+  }
+  return ai;
+}
+
+// ─── Main — one Jira ticket per root cause (changed source file) ──────────────
 (async () => {
   try {
-    // Step 1: Analyze
-    console.log('🤖 Step 1: Claude is analyzing git diff + test failures...');
-    const ai = await analyzeFailures();
-    if (ai) {
-      console.log(`✅ Bug identified: ${ai.whatChanged?.slice(0, 100)}`);
-      console.log(`   Component: ${ai.affectedComponent} | Severity: ${ai.severity}`);
-    } else {
-      console.log('⚠️  AI unavailable — using fallback report');
-    }
+    // ── Group failures by root cause ─────────────────────────────────────────
+    const groups = groupFailuresBySource();
+    console.log(`\n📊 ${groups.length} root cause group(s) identified:`);
+    groups.forEach((g, i) =>
+      console.log(`   ${i + 1}. ${g.sourceFile || 'untraced'} → ${g.specFiles.map(s => path.basename(s)).join(', ')}`)
+    );
 
-    // FIX #7: Validate AI output — fill missing fields with product-language fallbacks
-    if (ai) {
-      if (!ai.summary || ai.summary.toLowerCase().includes('e2e') || ai.summary.toLowerCase().includes('playwright')) {
-        console.warn('⚠️  AI summary used test language — replacing with product language');
-        ai.summary = productFallbackSummary();
-      }
-      if (!ai.whatChanged)       ai.whatChanged       = productFallbackWhatChanged();
-      if (!ai.changedFile)       ai.changedFile        = 'See git diff';
-      if (!ai.oldValue)          ai.oldValue           = 'See git diff (minus lines)';
-      if (!ai.newValue)          ai.newValue           = 'See git diff (plus lines)';
-      if (!ai.affectedComponent) ai.affectedComponent  = 'Unknown — check diff';
-      if (!ai.severity)          ai.severity           = 'High';
-      if (!Array.isArray(ai.stepsToReproduce) || ai.stepsToReproduce.length === 0) {
-        ai.stepsToReproduce = ['Open the application in a browser', 'Navigate to the affected page', 'Reproduce the action that caused the failure', 'Observe the incorrect behaviour'];
-      }
-      if (!ai.expectedResult) ai.expectedResult = 'Product behaves as designed with correct UI text and functionality';
-      if (!ai.actualResult)   ai.actualResult   = productFallbackWhatChanged();
-      if (!Array.isArray(ai.searchKeywords) || ai.searchKeywords.length === 0) {
-        ai.searchKeywords = failedTests.slice(0, 2).map(t => t.split('/').pop().replace('.spec.js', ''));
-      }
-    }
-
-    // Step 2: Search for duplicates
-    console.log('🔍 Step 2: Searching Jira for existing open bugs...');
-    const keywords = ai?.searchKeywords?.length ? ai.searchKeywords : failedTests.slice(0, 2);
-    const existing = await searchExistingBugs(keywords);
-    console.log(`   Found ${existing.length} potentially related open bug(s)`);
-
-    // Step 3: Deduplication
-    let duplicate = null;
-    if (existing.length && ai) {
-      console.log('🤖 Step 3: Checking for duplicate...');
-      duplicate = await checkDuplicate(existing, ai);
-      if (duplicate?.isDuplicate) {
-        console.log(`✅ Duplicate: ${duplicate.matchingIssueKey} — ${duplicate.reason}`);
-      } else {
-        console.log('✅ Not a duplicate — creating new bug');
-      }
-    }
-
-    // Step 4: Find Playwright artifacts
-    console.log('📁 Step 4: Finding Playwright screenshots and videos...');
+    // ── Playwright artifacts — found once, attached to first new ticket ───────
     const artifacts = findArtifacts();
-    console.log(`   Found ${artifacts.screenshots.length} screenshot(s), ${artifacts.videos.length} video(s)`);
+    console.log(`📁 Artifacts: ${artifacts.screenshots.length} screenshot(s), ${artifacts.videos.length} video(s)`);
 
-    // Step 5: Create or update Jira
-    let issueKey;
-    if (duplicate?.isDuplicate && duplicate?.matchingIssueKey) {
-      console.log(`📝 Step 5: Adding comment to existing bug ${duplicate.matchingIssueKey}...`);
-      await addComment(duplicate.matchingIssueKey, buildDuplicateComment(ai, duplicate.reason));
-      issueKey = duplicate.matchingIssueKey;
-      console.log(`✅ Comment added to ${issueKey}`);
-    } else {
-      console.log('📝 Step 5: Creating new Jira bug...');
-      // FIX #2: Never use PR commit message as summary — always use product language
-      const summary = (ai?.summary || productFallbackSummary()).slice(0, 255);
+    const createdTickets = []; // {key, url, sourceFile}
+    let screenshotsAttached = false;
 
-      const issue = await createJiraIssue(summary, buildDescription(ai));
-      issueKey = issue.key;
-      console.log(`✅ Created: ${issueKey}`);
+    // ── Loop — one Jira ticket per group ─────────────────────────────────────
+    for (let i = 0; i < groups.length; i++) {
+      const group = groups[i];
+      const label = group.sourceFile ? path.basename(group.sourceFile) : 'untraced failures';
+      console.log(`\n${'━'.repeat(60)}`);
+      console.log(`🔍 Group ${i + 1}/${groups.length}: ${label}`);
+      console.log(`   Specs: ${group.specFiles.map(s => path.basename(s)).join(', ')}`);
+
+      // Step 1: Claude analyzes this specific group
+      console.log('🤖 Analyzing with Claude...');
+      let ai = await analyzeFailures(group);
+      ai = validateAI(ai, group);
+
+      if (ai) {
+        console.log(`   ✅ ${ai.summary?.slice(0, 80)}`);
+        console.log(`   Component: ${ai.affectedComponent} | Severity: ${ai.severity}`);
+      } else {
+        console.log('   ⚠️  AI unavailable — using product-language fallback');
+      }
+
+      // Step 2: Search Jira for duplicates
+      const keywords = ai?.searchKeywords?.length
+        ? ai.searchKeywords
+        : group.specFiles.map(s => path.basename(s).replace('.spec.js', '')).slice(0, 2);
+      const existing = await searchExistingBugs(keywords);
+      console.log(`🔍 Duplicate search: ${existing.length} open bug(s) found`);
+
+      // Step 3: Dedup check
+      let duplicate = null;
+      if (existing.length && ai) {
+        duplicate = await checkDuplicate(existing, ai);
+        if (duplicate?.isDuplicate) {
+          console.log(`   ✅ Duplicate of ${duplicate.matchingIssueKey} — will comment`);
+        } else {
+          console.log('   ✅ Not a duplicate — will create new ticket');
+        }
+      }
+
+      // Step 4: Create or comment
+      let issueKey;
+      if (duplicate?.isDuplicate && duplicate?.matchingIssueKey) {
+        await addComment(duplicate.matchingIssueKey, buildDuplicateComment(ai, duplicate.reason));
+        issueKey = duplicate.matchingIssueKey;
+        console.log(`📝 Comment added to ${issueKey}`);
+      } else {
+        const summary = (ai?.summary || productFallbackSummary()).slice(0, 255);
+        const issue   = await createJiraIssue(summary, buildDescription(ai));
+        issueKey      = issue.key;
+        console.log(`📝 Created: ${issueKey} — ${summary.slice(0, 60)}`);
+
+        // Step 5: Attach screenshots to the FIRST new ticket only
+        if (!screenshotsAttached && artifacts.screenshots.length > 0) {
+          await attachArtifacts(issueKey, artifacts);
+          screenshotsAttached = true;
+        }
+      }
+
+      const issueUrl = `${JIRA_HOST}/browse/${issueKey}`;
+      createdTickets.push({ key: issueKey, url: issueUrl, sourceFile: group.sourceFile });
+      console.log(`JIRA_ISSUE_KEY=${issueKey}`);
+      console.log(`JIRA_ISSUE_URL=${issueUrl}`);
     }
 
-    // Step 6: Attach screenshots and videos
-    console.log(`📎 Step 6: Attaching screenshots and videos to ${issueKey}...`);
-    await attachArtifacts(issueKey, artifacts);
-
-    const issueUrl = `${JIRA_HOST}/browse/${issueKey}`;
-    console.log(`\n🎉 Done! Jira bug: ${issueUrl}`);
-    console.log(`JIRA_ISSUE_KEY=${issueKey}`);
-    console.log(`JIRA_ISSUE_URL=${issueUrl}`);
+    // ── Summary ───────────────────────────────────────────────────────────────
+    console.log(`\n${'━'.repeat(60)}`);
+    console.log(`🎉 Done — ${createdTickets.length} Jira ticket(s) created/updated:`);
+    createdTickets.forEach(t => console.log(`   ${t.key}  ${t.url}`));
 
   } catch (err) {
     console.error('❌ Failed:', err.message);

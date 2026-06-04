@@ -294,6 +294,24 @@ jobs:
           echo "$FAILED" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
 
+      # Capture WHICH spec files failed (not just test names) — used for root-cause grouping
+      - name: "📋 Extract failed spec files"
+        id: failed-specs
+        if: steps.playwright.outputs.exit_code != '0'
+        run: |
+          SPECS=$(node -e "
+            try {
+              const r = require('./test-results/results.json');
+              const files = r.suites
+                .filter(s => s.specs && s.specs.some(sp => sp.tests && sp.tests.some(t => t.status === 'failed' || t.status === 'timedOut')))
+                .map(s => s.file || s.title).filter(Boolean);
+              console.log([...new Set(files)].join('\n'));
+            } catch(e) { console.log(''); }
+          " 2>/dev/null || echo '')
+          echo "specs<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$SPECS" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+
       # ── Phase 4 & 5: Update decision log + persist for future PRs ───────────
       - name: "🧠 Update decision log with test outcomes"
         if: always()
@@ -362,6 +380,7 @@ jobs:
     outputs:
       status: ${{ steps.test-status.outputs.status }}
       failed-names: ${{ steps.failed-names.outputs.names }}
+      failed-specs: ${{ steps.failed-specs.outputs.specs }}
       error-log: ${{ steps.playwright.outputs.exit_code }}
 
   # ─────────────────────────────────────────────────────────────────────────────
@@ -418,7 +437,23 @@ jobs:
         with:
           node-version: '18'
 
-      - name: Create Jira defect
+      # Build dependency graph to group failures by root cause (one ticket per changed file)
+      - name: "🔍 Build dependency graph for root-cause grouping"
+        id: graph
+        run: |
+          CHANGED="${{ needs.detect-changes.outputs.changed-files }}"
+          FILES=$(echo "$CHANGED" | tr ',' '\n' | grep -v '\.\(lock\|md\|json\|css\|png\|svg\|ico\)$' | grep -v 'node_modules' | head -20 || echo '')
+          if [ -n "$FILES" ]; then
+            GRAPH=$(echo "$FILES" | xargs node scripts/build-dependency-graph.js 2>/dev/null || echo '{}')
+          else
+            GRAPH='{}'
+          fi
+          echo "output<<EOF" >> "$GITHUB_OUTPUT"
+          echo "$GRAPH" >> "$GITHUB_OUTPUT"
+          echo "EOF" >> "$GITHUB_OUTPUT"
+          echo "Graph built — $(echo "$GRAPH" | node -e "try{const g=JSON.parse(require('fs').readFileSync('/dev/stdin','utf8'));console.log(Object.keys(g).length+' file(s)')}catch{console.log('parse error')}")"
+
+      - name: Create Jira defect(s)
         id: jira
         env:
           JIRA_HOST: ${{ secrets.JIRA_HOST }}
@@ -431,6 +466,8 @@ jobs:
           PR_URL: ${{ github.event.pull_request.html_url }}
           COMMIT_SHA: ${{ github.event.pull_request.head.sha }}
           FAILED_TESTS: ${{ needs.run-tests.outputs.failed-names }}
+          FAILED_SPECS: ${{ needs.run-tests.outputs.failed-specs }}
+          GRAPH_OUTPUT: ${{ steps.graph.outputs.output }}
           ERROR_DETAILS: ${{ steps.error-log.outputs.log }}
           GIT_DIFF: ${{ steps.git-diff.outputs.diff }}
           ARTIFACTS_PATH: test-artifacts
@@ -438,40 +475,46 @@ jobs:
         run: |
           OUTPUT=$(node scripts/create-jira-defect.js)
           echo "$OUTPUT"
-          JIRA_KEY=$(echo "$OUTPUT" | grep '^JIRA_ISSUE_KEY=' | cut -d= -f2)
-          JIRA_URL=$(echo "$OUTPUT" | grep '^JIRA_ISSUE_URL=' | cut -d= -f2)
-          echo "key=$JIRA_KEY" >> "$GITHUB_OUTPUT"
-          echo "url=$JIRA_URL" >> "$GITHUB_OUTPUT"
+          # Collect ALL ticket keys (one per root-cause group)
+          KEYS=$(echo "$OUTPUT" | grep '^JIRA_ISSUE_KEY=' | cut -d= -f2 | paste -sd',' -)
+          URLS=$(echo "$OUTPUT" | grep '^JIRA_ISSUE_URL=' | cut -d= -f2 | paste -sd',' -)
+          echo "keys=$KEYS" >> "$GITHUB_OUTPUT"
+          echo "urls=$URLS" >> "$GITHUB_OUTPUT"
 
-      - name: Post failure comment with Jira link
+      - name: Post failure comment with Jira link(s)
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
           script: |
-            const jiraKey  = '${{ steps.jira.outputs.key }}';
-            const jiraUrl  = '${{ steps.jira.outputs.url }}';
-            const prNumber = context.issue.number;
-            const runUrl   = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const keys   = '${{ steps.jira.outputs.keys }}'.split(',').filter(Boolean);
+            const urls   = '${{ steps.jira.outputs.urls }}'.split(',').filter(Boolean);
+            const runUrl = `${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+
             const failedTests = `${{ needs.run-tests.outputs.failed-names }}`
               .split('\n').filter(Boolean).map(t => `  - ${t}`).join('\n') || '  _(see report)_';
 
+            const ticketLines = keys.map((k, i) =>
+              `  - [${k}](${urls[i] || '#'})`
+            ).join('\n') || '  _(see workflow output)_';
+
             const body = [
-              '## ❌ E2E Tests Failed',
+              '## ❌ Tests Failed — Product Regression Detected',
               '',
               '**Failed tests:**',
               failedTests,
               '',
-              `**Jira defect created:** [${jiraKey}](${jiraUrl})`,
+              `**Jira defect(s) created — one per root cause:**`,
+              ticketLines,
               '',
               `**Full report:** [GitHub Actions Run](${runUrl})`,
               '',
-              '_Please fix the failing tests before merging._',
+              '_Fix the failing tests before merging._',
             ].join('\n');
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              issue_number: prNumber,
+              issue_number: context.issue.number,
               body,
             });
 
