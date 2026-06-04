@@ -199,11 +199,11 @@ function logDecision({ changedFiles, graphSuggested, claudeSelected, finalSelect
 function callOpenRouter(apiKey, prompt) {
   return new Promise((resolve, reject) => {
     const payload = JSON.stringify({
-      // Phase 3: Upgraded from claude-3.5-haiku → claude-3.5-sonnet
-      // Better architectural reasoning = fewer wrong selections
-      model      : 'anthropic/claude-3.5-sonnet',
+      // Model: claude-3.5-haiku (fast, low-cost, confirmed on OpenRouter free tier)
+      // Upgrade to anthropic/claude-3.5-sonnet when your OpenRouter plan supports it
+      model      : 'anthropic/claude-3.5-haiku',
       messages   : [{ role: 'user', content: prompt }],
-      max_tokens : 1000,   // was 300 — enough room to reason before concluding
+      max_tokens : 1000,   // increased from 300 — enough room to reason before concluding
       temperature: 0,
     });
 
