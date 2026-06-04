@@ -11,7 +11,7 @@ concurrency:
 permissions:
   pull-requests: write
   issues: write
-  contents: read
+  contents: write   # needed to commit updated decision-log.json back to branch
 
 env:
   NODE_VERSION: '18'
@@ -39,6 +39,22 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
 
+      # ── Phase 1: Self-learning scanner ────────────────────────────────────
+      # Scans all test files for navigation signals → builds test-route-map.json
+      # This replaces the hardcoded PAGE_TEST_MAP in build-dependency-graph.js
+      - name: "🔬 Scan test navigation patterns (self-learning)"
+        run: node scripts/scan-test-patterns.js
+
+      # ── Phase 2 & 5: Restore decision log from previous runs ──────────────
+      # The log grows across PRs and feeds the self-correcting feedback loop
+      - name: "📚 Restore decision log (feedback loop data)"
+        uses: actions/cache/restore@v4
+        with:
+          path: scripts/decision-log.json
+          key: decision-log-${{ github.run_id }}
+          restore-keys: |
+            decision-log-
+
       - name: Get changed files
         id: changed
         run: |
@@ -55,12 +71,24 @@ jobs:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CHANGED_FILES: ${{ steps.changed.outputs.files }}
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_REF: ${{ github.ref }}
         run: |
           CHANGED="${{ steps.changed.outputs.files }}"
           NEWLINE_FILES=$(echo "$CHANGED" | tr ',' '\n')
           TEST_FILES=$(echo "$NEWLINE_FILES" | node scripts/resolve-tests.js)
           echo "test-files=$TEST_FILES" >> "$GITHUB_OUTPUT"
           echo "Claude selected test files: $TEST_FILES"
+
+      # Pass decision log + route map to the run-tests job via artifacts
+      - name: "📤 Upload learning artifacts for run-tests job"
+        uses: actions/upload-artifact@v4
+        with:
+          name: learning-artifacts-${{ github.run_id }}
+          path: |
+            scripts/decision-log.json
+            scripts/test-route-map.json
+          retention-days: 7
 
   # ─────────────────────────────────────────────────────────────────────────────
   # 2. Post "Test automation triggered" comment on the PR
@@ -124,6 +152,14 @@ jobs:
         with:
           node-version: ${{ env.NODE_VERSION }}
           cache: 'npm'
+
+      # ── Phase 2 & 5: Download learning artifacts from detect-changes ─────────
+      - name: "📥 Download learning artifacts"
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: learning-artifacts-${{ github.run_id }}
+          path: scripts/
 
       # npm install (not ci) — npm workspaces + npm ci skips root devDeps (craco, playwright)
       - name: Install frontend dependencies
@@ -257,6 +293,21 @@ jobs:
           echo "names<<EOF" >> "$GITHUB_OUTPUT"
           echo "$FAILED" >> "$GITHUB_OUTPUT"
           echo "EOF" >> "$GITHUB_OUTPUT"
+
+      # ── Phase 4 & 5: Update decision log with actual test results ────────────
+      # This closes the feedback loop — next PR run will use this data
+      - name: "🧠 Update decision log with test outcomes"
+        if: always()
+        run: node scripts/update-decision-log.js
+
+      # Save updated decision log as artifact for caching job
+      - name: "📤 Upload updated decision log"
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: updated-decision-log-${{ github.run_id }}
+          path: scripts/decision-log.json
+          retention-days: 7
 
       # Write environment info into the Allure report
       - name: "📝 Write Allure environment info"
@@ -421,12 +472,36 @@ jobs:
             });
 
   # ─────────────────────────────────────────────────────────────────────────────
-  # 4b. On SUCCESS → post success comment
+  # 4b. Persist learning — saves updated decision log to cache for future PRs
+  # Runs regardless of test outcome so the log is never lost
+  # ─────────────────────────────────────────────────────────────────────────────
+  persist-learning:
+    name: "💾 Persist Learning Data"
+    runs-on: ubuntu-latest
+    needs: [run-tests]
+    if: always()
+
+    steps:
+      - name: Download updated decision log
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          name: updated-decision-log-${{ github.run_id }}
+          path: scripts/
+
+      - name: "💾 Save decision log to cache (persists across PRs)"
+        uses: actions/cache/save@v4
+        with:
+          path: scripts/decision-log.json
+          key: decision-log-${{ github.run_id }}
+
+  # ─────────────────────────────────────────────────────────────────────────────
+  # 4c. On SUCCESS → post success comment
   # ─────────────────────────────────────────────────────────────────────────────
   on-success:
     name: "✅ Quality Gate Verdict"
     runs-on: ubuntu-latest
-    needs: [detect-changes, run-tests]
+    needs: [detect-changes, run-tests, persist-learning]
     if: always() && needs.run-tests.outputs.status == 'success'
 
     steps:
