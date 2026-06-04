@@ -86,9 +86,15 @@ function findArtifacts() {
   }
 
   walk(ARTIFACTS_PATH);
-  // Return only failing test artifacts (limit to avoid huge uploads)
+  // FIX #5: Playwright names screenshots by test title — 'failed' is NEVER in the filename.
+  // Take all screenshots, prioritise any that have 'retry' in path (those are definite failures),
+  // then fill up to 3 from the rest.
+  const retryShots = screenshots.filter(f => f.includes('retry'));
+  const otherShots = screenshots.filter(f => !f.includes('retry'));
+  const finalShots = [...retryShots, ...otherShots].slice(0, 3);
+
   return {
-    screenshots: screenshots.filter(f => f.includes('failed') || f.includes('test-failed')).slice(0, 3),
+    screenshots: finalShots,
     videos: videos.slice(0, 2),
   };
 }
@@ -175,7 +181,7 @@ async function callClaude(prompt, maxTokens = 1000) {
   if (!OPENROUTER_API_KEY) return null;
 
   const body = JSON.stringify({
-    model: 'anthropic/claude-3-5-haiku',
+    model: 'anthropic/claude-3.5-haiku',   // FIX #1: dots not hyphens
     messages: [{ role: 'user', content: prompt }],
     response_format: { type: 'json_object' },
     max_tokens: maxTokens,
@@ -202,43 +208,102 @@ async function callClaude(prompt, maxTokens = 1000) {
   }
 }
 
+// ─── FIX #2: Product-language fallback when AI is unavailable ─────────────────
+// Maps failed spec files to plain-English product area names
+const SPEC_TO_PRODUCT_AREA = {
+  'auth.spec.js'     : 'Authentication Flow',
+  'products.spec.js' : 'Product Browsing',
+  'cart.spec.js'     : 'Shopping Cart',
+  'checkout.spec.js' : 'Checkout Flow',
+  'search.spec.js'   : 'Search and Navigation',
+};
+
+function productFallbackSummary() {
+  // Derive product areas from the failed spec file names — never use PR title
+  const areas = [...new Set(
+    failedTests
+      .map(t => {
+        const spec = Object.keys(SPEC_TO_PRODUCT_AREA).find(s => t.includes(s));
+        return spec ? SPEC_TO_PRODUCT_AREA[spec] : null;
+      })
+      .filter(Boolean)
+  )];
+
+  if (areas.length > 0) {
+    return `${areas.join(' and ')} broken in PR #${PR_NUMBER} — E2E tests detected a regression`;
+  }
+  return `Product regression detected in PR #${PR_NUMBER} — manual investigation required`;
+}
+
+function productFallbackWhatChanged() {
+  // Extract something useful from the error log if no diff is available
+  if (ERROR_DETAILS) {
+    const errorLine = ERROR_DETAILS.split('\n')
+      .find(l => l.includes('expected') || l.includes('toHaveText') || l.includes('toBeVisible') || l.includes('Error:'));
+    if (errorLine) return `Test assertion failed: ${errorLine.trim().slice(0, 300)}`;
+  }
+  const areas = [...new Set(
+    failedTests
+      .map(t => {
+        const spec = Object.keys(SPEC_TO_PRODUCT_AREA).find(s => t.includes(s));
+        return spec ? SPEC_TO_PRODUCT_AREA[spec] : null;
+      })
+      .filter(Boolean)
+  )];
+  return areas.length > 0
+    ? `Regression in ${areas.join(', ')} — ${failedTests.length} test(s) failed. See git diff and Playwright output for details.`
+    : `${failedTests.length} E2E test(s) failed. Manual investigation required.`;
+}
+
 // ─── Step 1: AI analyzes diff + failures ─────────────────────────────────────
 async function analyzeFailures() {
+  // FIX #4: Take last 3000 chars of error log — that's where actual failures are
+  const errorSnippet = ERROR_DETAILS
+    ? ERROR_DETAILS.slice(-3000)
+    : 'Not available';
+
+  // FIX #4: Increase diff window to 6000 chars
+  const diffSnippet = GIT_DIFF
+    ? GIT_DIFF.slice(0, 6000)
+    : 'Not available';
+
   const prompt = `You are a senior QA engineer writing a Jira bug report.
 You have two inputs: (1) the git diff showing what code changed in this PR, and (2) the Playwright test failures.
-Your job is to connect the dots — explain exactly what changed in the code and how it caused the tests to fail.
+Your job is to connect the dots — explain exactly what changed in the CODE and how it broke the PRODUCT for real users.
 
-## Git Diff (what the developer changed in this PR)
-${GIT_DIFF ? GIT_DIFF.slice(0, 3000) : 'Not available'}
+## Git Diff (what the developer changed)
+${diffSnippet}
 
 ## Failed Tests
-${failedTests.length > 0 ? failedTests.map((t, i) => `${i + 1}. ${t}`).join('\n') : 'See error details'}
+${failedTests.length > 0 ? failedTests.map((t, i) => `${i + 1}. ${t}`).join('\n') : 'See error details below'}
 
-## Playwright Error Output
-${ERROR_DETAILS ? ERROR_DETAILS.slice(0, 2000) : 'Not available'}
+## Playwright Error Output (last portion — this is where the actual failure message is)
+${errorSnippet}
 
 ## PR Info
 PR #${PR_NUMBER}: ${PR_TITLE}
 
-Instructions:
-- Look at the git diff to find EXACTLY what changed (e.g. button text, API response, component)
-- Explain the bug in plain English: "The [element] was changed from '[old value]' to '[new value]'"
-- Write steps to reproduce using the ACTUAL navigation path the Playwright test took
-- Be specific with file names, button names, page URLs from the diff and test output
+CRITICAL RULES — you must follow all of these:
+1. Write everything in PRODUCT language. Never say "E2E test failed" or "Playwright" or "CI". Say "Button text changed", "API returns wrong status", "Page does not load".
+2. The summary MUST describe what broke for the user — e.g. "Checkout button text changed from 'Proceed to Checkout' to 'I am Here' breaking cart flow" NOT "[PR #2] E2E failure".
+3. stepsToReproduce must be browser navigation steps a human tester follows — not test code.
+4. Extract EXACT values from the git diff for oldValue and newValue. Do not guess.
+5. If multiple files changed, list all of them comma-separated in changedFile.
+6. ALL fields are required. Never return null for any field. Use your best judgment if unsure.
 
-Return JSON with these exact fields:
+Return JSON with these exact fields — every field must have a real non-null value:
 {
-  "summary": "One-line bug title mentioning what changed and where (max 200 chars)",
-  "whatChanged": "Exact description of the code change — e.g. 'Button text in Cart.jsx changed from Proceed to Checkout to AI is coming'",
-  "changedFile": "The file where the change was made e.g. src/pages/Cart.jsx",
-  "oldValue": "The original value before the change e.g. Proceed to Checkout",
-  "newValue": "The new value after the change e.g. AI is coming",
-  "affectedComponent": "Which page/component is affected e.g. Cart Page",
+  "summary": "Product-language title: what broke and where. Max 200 chars. No mention of E2E, Playwright, or CI.",
+  "whatChanged": "Exact description: 'Button text in [file] changed from [old] to [new]' or 'API endpoint [x] now returns [y] instead of [z]'",
+  "changedFile": "All changed source files comma-separated e.g. src/components/ProductCard.jsx,src/pages/Cart.jsx",
+  "oldValue": "The original value(s) before the change — extracted directly from the git diff minus lines",
+  "newValue": "The new value(s) after the change — extracted directly from the git diff plus lines",
+  "affectedComponent": "Product area affected e.g. Shopping Cart, Checkout Flow, Product Listing, Authentication",
   "severity": "Critical | High | Medium | Low",
-  "stepsToReproduce": ["Exact navigation steps the test took, e.g. Go to /shop", "Click on the first product card", "Click Add to Cart button", "Navigate to /cart"],
-  "expectedResult": "What should be there — e.g. A button with text Proceed to Checkout is visible",
-  "actualResult": "What is actually there — e.g. The button reads AI is coming",
-  "searchKeywords": ["2-3 short keywords for Jira duplicate search"]
+  "stepsToReproduce": ["Go to /shop", "Click on a product card", "Click the Add to Cart button", "Go to /cart", "Click Proceed to Checkout"],
+  "expectedResult": "What a user should see — e.g. A clearly labelled button 'Proceed to Checkout' is visible on the cart page",
+  "actualResult": "What a user actually sees — e.g. The button reads 'I am Here' which is confusing and breaks test assertions",
+  "searchKeywords": ["2-3 short product-domain keywords for duplicate search e.g. checkout button cart"]
 }`;
 
   return callClaude(prompt, 1000);
@@ -287,7 +352,7 @@ Return JSON:
   "reason": "Brief explanation"
 }
 
-Only return isDuplicate: true if the existing bug is clearly the SAME root cause.`, 200);
+Only return isDuplicate: true if the existing bug is clearly the SAME root cause.`, 500);  // FIX #6: was 200 — not enough tokens to reason
 
   return result;
 }
@@ -335,7 +400,7 @@ function buildDescription(ai) {
 
   // What is the bug
   content.push(h(2, '🐛 Bug Summary'));
-  content.push(p(ai?.whatChanged || `E2E tests failed during PR #${PR_NUMBER}. ${failedTests.length} test(s) failed.`));
+  content.push(p(ai?.whatChanged || productFallbackWhatChanged()));
 
   if (ai?.changedFile) {
     content.push(p(`📁 File changed: ${ai.changedFile}`));
@@ -370,10 +435,10 @@ function buildDescription(ai) {
   ));
 
   content.push(h(3, '✅ Expected Result'));
-  content.push(p(ai?.expectedResult || 'All E2E tests pass with the correct UI elements present.'));
+  content.push(p(ai?.expectedResult || 'Product behaves as designed — UI elements have correct text and functionality works end to end.'));
 
   content.push(h(3, '❌ Actual Result'));
-  content.push(p(ai?.actualResult || `${failedTests.length} test(s) failed.`));
+  content.push(p(ai?.actualResult || productFallbackWhatChanged()));
 
   content.push(rule());
 
@@ -504,6 +569,28 @@ async function attachArtifacts(issueKey, artifacts) {
       console.log('⚠️  AI unavailable — using fallback report');
     }
 
+    // FIX #7: Validate AI output — fill missing fields with product-language fallbacks
+    if (ai) {
+      if (!ai.summary || ai.summary.toLowerCase().includes('e2e') || ai.summary.toLowerCase().includes('playwright')) {
+        console.warn('⚠️  AI summary used test language — replacing with product language');
+        ai.summary = productFallbackSummary();
+      }
+      if (!ai.whatChanged)       ai.whatChanged       = productFallbackWhatChanged();
+      if (!ai.changedFile)       ai.changedFile        = 'See git diff';
+      if (!ai.oldValue)          ai.oldValue           = 'See git diff (minus lines)';
+      if (!ai.newValue)          ai.newValue           = 'See git diff (plus lines)';
+      if (!ai.affectedComponent) ai.affectedComponent  = 'Unknown — check diff';
+      if (!ai.severity)          ai.severity           = 'High';
+      if (!Array.isArray(ai.stepsToReproduce) || ai.stepsToReproduce.length === 0) {
+        ai.stepsToReproduce = ['Open the application in a browser', 'Navigate to the affected page', 'Reproduce the action that caused the failure', 'Observe the incorrect behaviour'];
+      }
+      if (!ai.expectedResult) ai.expectedResult = 'Product behaves as designed with correct UI text and functionality';
+      if (!ai.actualResult)   ai.actualResult   = productFallbackWhatChanged();
+      if (!Array.isArray(ai.searchKeywords) || ai.searchKeywords.length === 0) {
+        ai.searchKeywords = failedTests.slice(0, 2).map(t => t.split('/').pop().replace('.spec.js', ''));
+      }
+    }
+
     // Step 2: Search for duplicates
     console.log('🔍 Step 2: Searching Jira for existing open bugs...');
     const keywords = ai?.searchKeywords?.length ? ai.searchKeywords : failedTests.slice(0, 2);
@@ -536,9 +623,8 @@ async function attachArtifacts(issueKey, artifacts) {
       console.log(`✅ Comment added to ${issueKey}`);
     } else {
       console.log('📝 Step 5: Creating new Jira bug...');
-      const summary = ai?.summary
-        ? ai.summary
-        : `[PR #${PR_NUMBER}] E2E failure: ${PR_TITLE}`.slice(0, 255);
+      // FIX #2: Never use PR commit message as summary — always use product language
+      const summary = (ai?.summary || productFallbackSummary()).slice(0, 255);
 
       const issue = await createJiraIssue(summary, buildDescription(ai));
       issueKey = issue.key;
