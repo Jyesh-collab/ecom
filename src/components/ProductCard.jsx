@@ -124,7 +124,7 @@ export default function ProductCard({ product, addToCart }) {
             addToCart(product);
           }}
         >
-          Add to Cart
+          Put Uday In cart
         </Button>
         <Tooltip title="See full specs" arrow>
           <Button
