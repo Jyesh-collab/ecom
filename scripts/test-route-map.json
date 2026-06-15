@@ -1,0 +1,123 @@
+{
+  "generatedAt": "2026-06-04T15:19:59.444Z",
+  "scannedFiles": 5,
+  "testSignals": {
+    "tests/e2e/auth.spec.js": {
+      "gotoRoutes": [
+        "/login",
+        "/register",
+        "/forgot-password"
+      ],
+      "urlAssertions": [],
+      "apiEndpoints": [
+        "auth"
+      ],
+      "navLinks": []
+    },
+    "tests/e2e/cart.spec.js": {
+      "gotoRoutes": [
+        "/shop",
+        "/cart"
+      ],
+      "urlAssertions": [
+        "/checkout",
+        "/shop"
+      ],
+      "apiEndpoints": [],
+      "navLinks": []
+    },
+    "tests/e2e/checkout.spec.js": {
+      "gotoRoutes": [
+        "/shop",
+        "/cart",
+        "/checkout"
+      ],
+      "urlAssertions": [
+        "/checkout"
+      ],
+      "apiEndpoints": [
+        "checkout"
+      ],
+      "navLinks": []
+    },
+    "tests/e2e/products.spec.js": {
+      "gotoRoutes": [
+        "/",
+        "/shop"
+      ],
+      "urlAssertions": [
+        "/product"
+      ],
+      "apiEndpoints": [
+        "products"
+      ],
+      "navLinks": []
+    },
+    "tests/e2e/search.spec.js": {
+      "gotoRoutes": [
+        "/",
+        "/shop"
+      ],
+      "urlAssertions": [],
+      "apiEndpoints": [
+        "search"
+      ],
+      "navLinks": [
+        "Home",
+        "Shop",
+        "About",
+        "Support"
+      ]
+    }
+  },
+  "routeToTests": {
+    "/login": [
+      "tests/e2e/auth.spec.js"
+    ],
+    "/register": [
+      "tests/e2e/auth.spec.js"
+    ],
+    "/forgot-password": [
+      "tests/e2e/auth.spec.js"
+    ],
+    "/api/auth": [
+      "tests/e2e/auth.spec.js"
+    ],
+    "/shop": [
+      "tests/e2e/cart.spec.js",
+      "tests/e2e/checkout.spec.js",
+      "tests/e2e/products.spec.js",
+      "tests/e2e/search.spec.js"
+    ],
+    "/cart": [
+      "tests/e2e/cart.spec.js",
+      "tests/e2e/checkout.spec.js"
+    ],
+    "/checkout": [
+      "tests/e2e/cart.spec.js",
+      "tests/e2e/checkout.spec.js"
+    ],
+    "/api/checkout": [
+      "tests/e2e/checkout.spec.js"
+    ],
+    "/": [
+      "tests/e2e/products.spec.js",
+      "tests/e2e/search.spec.js"
+    ],
+    "/product": [
+      "tests/e2e/products.spec.js"
+    ],
+    "/api/products": [
+      "tests/e2e/products.spec.js"
+    ],
+    "/api/search": [
+      "tests/e2e/search.spec.js"
+    ],
+    "/about": [
+      "tests/e2e/search.spec.js"
+    ],
+    "/support": [
+      "tests/e2e/search.spec.js"
+    ]
+  }
+}

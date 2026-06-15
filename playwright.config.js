@@ -11,13 +11,18 @@ module.exports = defineConfig({
   reporter: [
     ['list'],
     ['json', { outputFile: 'test-results/results.json' }],
-    ['html', { outputFolder: 'test-results/html', open: 'never' }],
+    ['html', { outputFolder: 'playwright-html-report', open: 'never' }],
+    ['allure-playwright', {
+      detail: true,
+      outputFolder: 'allure-results',
+      suiteTitle: true,
+    }],
   ],
   use: {
     baseURL: process.env.BASE_URL || 'http://localhost:3000',
-    trace: 'on-first-retry',
-    screenshot: 'only-on-failure',
-    video: 'on-first-retry',
+    trace: 'on',
+    screenshot: 'on',
+    video: 'on',
   },
   projects: [
     {
